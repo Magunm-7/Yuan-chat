@@ -1,6 +1,0 @@
-{
-  "in_dim": 3076,
-  "num_idx": 5,
-  "hidden_dim": 256,
-  "dropout": 0.1
-}

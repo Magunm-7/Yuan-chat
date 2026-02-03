@@ -30,8 +30,11 @@ class MultiModalPrefixLM(nn.Module):
             self.mu_head = None
 
         if not train_base:
-            for p in self.lm.parameters():
-                p.requires_grad_(False)
+            for n, p in self.lm.named_parameters():
+                if 'lora_' in n:
+                    p.requires_grad_(True)
+                else:
+                    p.requires_grad_(False)
 
     def forward(self, input_ids, attention_mask, labels,
                 audio_feat, video_feat, alpha=None, sample_weight=None, mu_target=None):

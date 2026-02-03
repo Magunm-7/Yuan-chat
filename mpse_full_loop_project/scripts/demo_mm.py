@@ -44,6 +44,8 @@ def main():
     ap.add_argument("--base_model_dir", required=True)
     ap.add_argument("--mm_prefix", required=True)
     ap.add_argument("--index_jsonl", required=True)
+    # 可选：显式指定 LoRA adapter 目录（如果你不想依赖 auto-detect / load_mm_prefix 的行为）
+    ap.add_argument("--lora_adapter", default=None)
     ap.add_argument("--max_new_tokens", type=int, default=128)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
@@ -55,9 +57,23 @@ def main():
     lm = AutoModelForCausalLM.from_pretrained(
         args.base_model_dir,
         torch_dtype=torch.float16 if args.device.startswith("cuda") else torch.float32
-    ).to(args.device).eval()
+    ).to(args.device)
 
+    # 如果你传了 lora_adapter，就在这里手动加载（更确定）
+    # 不传也没关系：后面的 load_mm_prefix 可能会自动加载同目录下的 lora_adapter
+    if args.lora_adapter is not None:
+        from peft import PeftModel
+        lm = PeftModel.from_pretrained(lm, args.lora_adapter)
+
+    lm.eval()
+
+    # load_mm_prefix：加载 projector；如果你的 load_mm_prefix 实现会 auto-load lora_adapter，也会在这里生效
     mm = load_mm_prefix(lm, args.mm_prefix, device=args.device)
+    mm.eval()
+
+    # 关键：生成时用 mm.lm（确保 LoRA 生效），而不是用最开始的 lm
+    gen_lm = mm.lm
+    gen_lm.eval()
 
     items = [json.loads(l) for l in open(args.index_jsonl, encoding="utf-8")]
     for it in items[:5]:  # demo：先跑前5条
@@ -78,7 +94,7 @@ def main():
 
         full_ids, inputs_embeds, attn2, K = build_inputs_embeds(mm, input_ids, attn, audio, video, alpha)
 
-        out = lm.generate(
+        out = gen_lm.generate(
             input_ids=full_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attn2,

@@ -55,8 +55,8 @@ def build_mm_cache(session_id: str, mp4_path: str, wav_path: str,
 
             # alpha as 2-dim (audio, video)
             alpha_dict = r.get("alpha", {})
-            a = float(alpha_dict.get("audio", alpha_dict.get("a", 0.5)))
-            v = float(alpha_dict.get("video", alpha_dict.get("v", 0.5)))
+            a = float(alpha_dict.get("audio", alpha_dict.get("a", alpha_dict.get("A", 0.5))))
+            v = float(alpha_dict.get("audio", alpha_dict.get("v", alpha_dict.get("V", 0.5))))
             alpha = np.array([a, v], dtype=np.float32)
 
             mu = _mu_dict_to_vec(r.get("mu", {}), idx_names)
