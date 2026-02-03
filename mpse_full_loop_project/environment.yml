@@ -1,0 +1,23 @@
+name: mpse-mvp
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pyyaml
+  - tqdm
+  - scipy
+  - pandas
+  - pytorch
+  - torchvision
+  - torchaudio
+  - ffmpeg  # optional but recommended if you want mp4->wav on server
+  - pip:
+      - librosa
+      - soundfile
+      - opencv-python
+      - mediapipe
+      - transformers
+      - accelerate
+      - faster-whisper

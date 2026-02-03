@@ -1,0 +1,98 @@
+# configs/default.yaml
+session:
+  id: "S0001"
+
+paths:
+  raw_video: "data/raw/{session_id}.mp4"
+  work_dir: "data/derived/{session_id}"
+  outputs_dir: "outputs'
+
+segment:
+  target_turns: 16
+  wav_sr: 16000
+  vad:
+    frame_ms: 30
+    thr: 0.00004
+    min_speech_ms: 250
+    min_silence_ms: 1500
+
+asr:
+  enabled: true
+  # IMPORTANT: set to your local CT2 faster-whisper model directory
+  model_dir: "/path/to/local/faster-whisper-small"
+  device: "cpu"      # set "cuda" if your CUDA runtime is correct
+  compute_type: "int8"
+
+agents:
+  # Three weak supervision sources
+  use_llm_text_rater: true
+  # If false, text rater becomes a simple rule-based rater.
+  use_audio_heuristic: true
+  use_video_heuristic: true
+
+llm:
+  # used by text-rater agent (and optional SFT baseline)
+  # IMPORTANT: set to your local LLM dir (ModelScope snapshot dir)
+  model_dir: "/path/to/local/llama-3.2-3b-instruct"
+  device: "cuda"  # "cpu" or "cuda"
+  max_new_tokens: 128
+
+indices:
+  names: ["dep", "sad", "anx", "stress", "microexpr_rate"]
+  # default thresholds (soft stop only)
+  tau:
+    dep: 0.30
+    sad: 0.30
+    anx: 0.30
+    stress: 0.30
+    microexpr_rate: 0.30
+
+mpse:
+  epochs: 5
+  batch_size: 8
+  lr: 3.0e-4
+  hidden_dim: 256
+  dropout: 0.1
+  use_pretrained_encoders: true
+  encoders:
+    text_model_dir: "/path/to/local/text-encoder"
+    audio_model_dir: "/path/to/local/audio-encoder"
+    video_model_dir: "/path/to/local/video-encoder"
+
+upgrade:
+  # how much to penalize uncertainty for sample weighting
+  sigma_lambda: 2.0
+  # treat improvements as trusted only if sigma below this
+  sigma_max: 0.12
+  # output whether to inject state tokens into SFT prompt
+  inject_state_tokens: true
+
+sft:
+  # text-only baseline (optional)
+  enabled: false
+  max_seq_len: 1024
+
+
+mm:
+  enabled: true
+  whisper_dir: "models/whisper-small"
+  clip_dir: "models/clip-vit-base-patch32"
+  n_frames: 8
+  k_audio: 8
+  k_video: 8
+  device: "cuda"
+
+teacher:
+  enabled: true
+  base_model_dir: "models/llama-3.2-3B-Instruct"
+  device: "cuda"
+  max_new_tokens: 128
+
+mm_sft:
+  enabled: true
+  base_model_dir: "models/llama-3.2-3B-Instruct"
+  out_dir: "outputs/mm_sft/{session_id}"
+  batch_size: 1
+  lr: 0.0002
+  epochs: 1
+  max_len: 1024
