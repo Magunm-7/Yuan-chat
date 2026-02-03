@@ -74,6 +74,7 @@ class MultiModalPrefixLM(nn.Module):
         ignore = torch.full((B, K), -100, dtype=labels.dtype, device=labels.device)
         lbl = torch.cat([ignore, labels], dim=1)
 
+        inputs_embeds = inputs_embeds.to(self.lm.dtype)
         out = self.lm(inputs_embeds=inputs_embeds, attention_mask=attn, labels=lbl, return_dict=True)
         loss = out.loss
 

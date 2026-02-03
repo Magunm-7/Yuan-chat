@@ -41,6 +41,13 @@ def train_mpse(npz_path: str, out_dir: str, epochs: int = 5, batch_size: int = 8
         loss_sum = 0.0
         n = 0
         for X, Y, Q in pbar:
+            if not isinstance(X, np.ndarray):
+                X = X.detach().cpu().numpy()
+            if not isinstance(Y, np.ndarray):
+                Y = Y.detach().cpu().numpy()
+            if not isinstance(Q, np.ndarray):
+                Q = Q.detach().cpu().numpy()
+
             X = torch.from_numpy(X).to(device)
             Y = torch.from_numpy(Y).to(device)
             Q = torch.from_numpy(Q).to(device)

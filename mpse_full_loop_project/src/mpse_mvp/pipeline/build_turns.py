@@ -12,6 +12,49 @@ from mpse_mvp.supervision.agents import (
     text_rater_rule, audio_rater_heuristic, video_rater_heuristic, fuse_labels
 )
 
+def _split_longest_until(segs, target_turns, min_len=0.4):
+    segs = list(segs)
+    while len(segs) < target_turns and len(segs) > 0:
+        k = max(range(len(segs)), key=lambda i: segs[i][1] - segs[i][0])
+        t0, t1 = segs[k]
+        if (t1 - t0) < 2 * min_len:
+            break
+        mid = (t0 + t1) / 2.0
+        segs[k] = (t0, mid)
+        segs.insert(k + 1, (mid, t1))
+    return segs
+
+def _postprocess_segs(segs, vad_cfg, total_secs):
+    # 1) merge close segments (gap <= merge_gap)
+    merge_gap = float(vad_cfg.get("merge_gap_sec", vad_cfg.get("min_silence_ms", 400) / 1000.0))
+    segs = sorted(segs)
+    merged = []
+    for t0, t1 in segs:
+        if not merged:
+            merged.append([t0, t1])
+        else:
+            if t0 - merged[-1][1] <= merge_gap:
+                merged[-1][1] = max(merged[-1][1], t1)
+            else:
+                merged.append([t0, t1])
+    segs = [(float(a), float(b)) for a, b in merged]
+
+    # 2) pad each seg (optional)
+    pad = float(vad_cfg.get("pad_sec", 0.2))
+    if pad > 0:
+        segs = [(max(0.0, t0 - pad), min(float(total_secs), t1 + pad)) for t0, t1 in segs]
+
+    # 3) match target_turns by splitting (no repeating last seg!)
+    target_turns = int(vad_cfg.get("target_turns", 0)) or 0
+    if target_turns > 0:
+        if len(segs) > target_turns:
+            segs = segs[:target_turns]
+        elif len(segs) < target_turns:
+            segs = _split_longest_until(segs, target_turns, min_len=float(vad_cfg.get("min_len_sec", 0.4)))
+
+    return segs
+
+
 def build_turns(session_id: str, mp4_path: str, wav_path: str, turns_path: str, target_turns: int,
                 vad_cfg: dict, idx_names: list[str], use_asr: bool,
                 asr_model_dir: str | None, asr_device: str = "cpu", asr_compute_type: str = "int8",
@@ -19,16 +62,26 @@ def build_turns(session_id: str, mp4_path: str, wav_path: str, turns_path: str, 
     os.makedirs(os.path.dirname(turns_path), exist_ok=True)
 
     wav, sr = load_wav(wav_path)
-    \1
-    total_secs = len(wav)/sr
+    total_secs = len(wav) / sr
+
+    # 1) VAD first
+    segs = energy_vad_segments(
+        wav, sr,
+        frame_ms=vad_cfg.get("frame_ms", 30),
+        thr=vad_cfg.get("thr", 0.02),
+        min_speech_ms=vad_cfg.get("min_speech_ms", 250),
+        min_silence_ms=vad_cfg.get("min_silence_ms", 400),
+    )
+
+    # 2) postprocess (merge/pad/split to target)
+    # pass target_turns into vad_cfg so _postprocess_segs can use it
+    vad_cfg = dict(vad_cfg)
+    vad_cfg["target_turns"] = target_turns
     segs = _postprocess_segs(segs, vad_cfg, total_secs)
+
     if len(segs) == 0:
         raise RuntimeError("VAD produced 0 segments. Try lower thr.")
-    if len(segs) > target_turns:
-        segs = segs[:target_turns]
-    if len(segs) < target_turns:
-        # If fewer than target_turns, split longest segments to reach target (no duplication).
-        segs = _split_longest_until(segs, target_turns, min_len_s=float(vad_cfg.get('min_len_s', 0.6)))
+
 
     # ASR whole audio once (optional)
     asr_segs = None

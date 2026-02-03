@@ -22,7 +22,8 @@ from mpse_mvp.segment.extract_audio import extract_wav_from_mp4
 from mpse_mvp.pipeline.build_turns import build_turns
 from mpse_mvp.pipeline.build_mpse_trainset import build_npz
 from mpse_mvp.mpse.train import train_mpse
-from mpse_mvp.upgrade.upgrade import upgrade_turns
+from mpse_mvp.upgrade.upgrade import upgrade
+import numpy as np
 from mpse_mvp.sft.teacher_generate import generate_teacher_sft
 from mpse_mvp.mm.cache_builder import build_mm_cache
 from mpse_mvp.mm.train_mm_sft import train_mm_sft
@@ -65,8 +66,8 @@ def main():
         asr_model_dir=cfg["asr"]["model_dir"],
         asr_device=cfg["asr"].get("device","cpu"),
         asr_compute_type=cfg["asr"].get("compute_type","int8"),
-        use_llm_rater=cfg["llm_rater"]["enabled"],
-        llm_cfg=cfg.get("llm_rater",{}),
+        use_llm_rater=cfg.get("llm_rater", {}).get("enabled", False),
+        llm_cfg=cfg.get("llm_rater", {}).get("llm_cfg", None),
     )
     print("turns saved:", turns_path)
 
@@ -76,12 +77,23 @@ def main():
     ensure_dir(mpse_dir)
     npz_path = os.path.join(mpse_dir, "train.npz")
     meta_path = os.path.join(mpse_dir, "meta.json")
-    build_npz(
+
+
+    use_pretrained = cfg["mpse"].get("use_pretrained_encoders", False)
+    enc_cfg = cfg["mpse"].get("encoders", {})
+
+    print("use_pretrained =", use_pretrained)
+    print("enc_cfg keys =", list(enc_cfg.keys()))
+    print("enc_cfg =", enc_cfg)
+    print("cfg mpse encoders =", cfg.get("mpse", {}).get("encoders", None))
+
+
+    npz_path, in_dim = build_npz(
         turns_path=turns_path,
         out_npz=npz_path,
         idx_names=cfg["indices"]["names"],
-        use_pretrained=cfg["mpse"]["use_pretrained_encoders"],
-        enc_cfg=cfg.get("mpse_encoders", {}),
+        use_pretrained=use_pretrained,
+        enc_cfg=enc_cfg,
     )
     print("npz:", npz_path)
 
@@ -89,13 +101,15 @@ def main():
     print("[3] Train MPSE ...")
     ckpt = train_mpse(
         npz_path=npz_path,
-        out_ckpt=os.path.join(mpse_dir, "mpse.pt"),
-        out_meta=meta_path,
-        idx_names=cfg["indices"]["names"],
+        out_dir=mpse_dir,
         epochs=cfg["mpse"]["epochs"],
+        batch_size=cfg["mpse"]["batch_size"],
         lr=cfg["mpse"]["lr"],
+        hidden_dim=cfg["mpse"]["hidden_dim"],
+        dropout=cfg["mpse"]["dropout"],
         device=cfg["mpse"].get("device","cpu"),
     )
+    meta_path = os.path.join(mpse_dir, "meta.json")
     print("mpse ckpt:", ckpt)
 
     # [4] Upgrade
@@ -103,14 +117,18 @@ def main():
     up_dir = os.path.join(outputs_dir, "upgrade", sid)
     ensure_dir(up_dir)
     up_path = os.path.join(up_dir, "turns_upgraded.jsonl")
-    upgrade_turns(
+    X = np.load(npz_path, allow_pickle=True)["X"]
+    upgrade(
         turns_path=turns_path,
-        mpse_ckpt=ckpt,
-        mpse_meta=meta_path,
-        out_path=up_path,
+        X=X,
+        ckpt=ckpt,
+        meta_path=meta_path,
         idx_names=cfg["indices"]["names"],
-        soft_end_cfg=cfg["soft_end"],
-        safety_cfg=cfg["safety"],
+        tau=cfg["indices"]["tau"],
+        out_turns_path=up_path,
+        sigma_lambda=cfg["upgrade"]["sigma_lambda"],
+        sigma_max=cfg["upgrade"]["sigma_max"],
+        inject_state_tokens=cfg["upgrade"]["inject_state_tokens"],
         device=cfg["mpse"].get("device","cpu"),
     )
     print("upgraded turns:", up_path)

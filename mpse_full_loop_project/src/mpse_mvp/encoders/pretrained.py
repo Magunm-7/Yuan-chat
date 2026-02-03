@@ -6,6 +6,9 @@ class TextEncoder:
     def __init__(self, model_dir: str, device: str = "cpu"):
         from transformers import AutoTokenizer, AutoModel
         self.tok = AutoTokenizer.from_pretrained(model_dir, local_files_only=True, trust_remote_code=True)
+        if self.tok.pad_token is None:
+            self.tok.pad_token = self.tok.eos_token
+
         self.model = AutoModel.from_pretrained(model_dir, local_files_only=True, trust_remote_code=True)
         self.model.to(device)
         self.model.eval()

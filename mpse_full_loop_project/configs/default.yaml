@@ -5,7 +5,7 @@ session:
 paths:
   raw_video: "data/raw/{session_id}.mp4"
   work_dir: "data/derived/{session_id}"
-  outputs_dir: "outputs'
+  outputs_dir: "outputs"
 
 segment:
   target_turns: 16
@@ -19,8 +19,8 @@ segment:
 asr:
   enabled: true
   # IMPORTANT: set to your local CT2 faster-whisper model directory
-  model_dir: "/path/to/local/faster-whisper-small"
-  device: "cpu"      # set "cuda" if your CUDA runtime is correct
+  model_dir: "/home/qmn/Yuan-chat/MPSE_FULL_LOOP_PROJECT/models/faster_whisper/pengzhendong/faster-whisper-small"
+  device: "cuda"      # set "cuda" if your CUDA runtime is correct
   compute_type: "int8"
 
 agents:
@@ -33,7 +33,7 @@ agents:
 llm:
   # used by text-rater agent (and optional SFT baseline)
   # IMPORTANT: set to your local LLM dir (ModelScope snapshot dir)
-  model_dir: "/path/to/local/llama-3.2-3b-instruct"
+  model_dir: "/home/qmn/Yuan-chat/MPSE_FULL_LOOP_PROJECT/models/llama3.2/LLM-Research/Llama-3___2-3B-Instruct"
   device: "cuda"  # "cpu" or "cuda"
   max_new_tokens: 128
 
@@ -47,6 +47,8 @@ indices:
     stress: 0.30
     microexpr_rate: 0.30
 
+
+
 mpse:
   epochs: 5
   batch_size: 8
@@ -55,9 +57,9 @@ mpse:
   dropout: 0.1
   use_pretrained_encoders: true
   encoders:
-    text_model_dir: "/path/to/local/text-encoder"
-    audio_model_dir: "/path/to/local/audio-encoder"
-    video_model_dir: "/path/to/local/video-encoder"
+    text_model_dir: "/home/qmn/Yuan-chat/MPSE_FULL_LOOP_PROJECT/models/llama3.2/LLM-Research/Llama-3___2-3B-Instruct"
+    audio_model_dir: "/home/qmn/Yuan-chat/MPSE_FULL_LOOP_PROJECT/models/whisper-small/openai-mirror/whisper-small"
+    video_model_dir: "/home/qmn/Yuan-chat/MPSE_FULL_LOOP_PROJECT/models/clip-vit-base-patch32/openai-mirror/clip-vit-base-patch32"
 
 upgrade:
   # how much to penalize uncertainty for sample weighting
@@ -75,8 +77,8 @@ sft:
 
 mm:
   enabled: true
-  whisper_dir: "models/whisper-small"
-  clip_dir: "models/clip-vit-base-patch32"
+  whisper_dir: "/home/qmn/Yuan-chat/MPSE_FULL_LOOP_PROJECT/models/whisper-small/openai-mirror/whisper-small"
+  clip_dir: "/home/qmn/Yuan-chat/MPSE_FULL_LOOP_PROJECT/models/clip-vit-base-patch32/openai-mirror/clip-vit-base-patch32"
   n_frames: 8
   k_audio: 8
   k_video: 8
@@ -84,13 +86,13 @@ mm:
 
 teacher:
   enabled: true
-  base_model_dir: "models/llama-3.2-3B-Instruct"
+  base_model_dir: "/home/qmn/Yuan-chat/MPSE_FULL_LOOP_PROJECT/models/llama3.2/LLM-Research/Llama-3___2-3B-Instruct"
   device: "cuda"
   max_new_tokens: 128
 
 mm_sft:
   enabled: true
-  base_model_dir: "models/llama-3.2-3B-Instruct"
+  base_model_dir: "/home/qmn/Yuan-chat/MPSE_FULL_LOOP_PROJECT/models/llama3.2/LLM-Research/Llama-3___2-3B-Instruct"
   out_dir: "outputs/mm_sft/{session_id}"
   batch_size: 1
   lr: 0.0002
