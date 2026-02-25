@@ -15,9 +15,9 @@
 对一个 human turn 片段，针对三个模态提取特征：
 
 - **文字**：内容编码 `encode`  
-  $$
+  \[
   \text{encode}(\text{text}) \rightarrow h_t^{\text{text}}
-  $$
+  \]
 
 - **语音**：时间段 \([t_0, t_1]\)（可加 \(\pm \delta\) 扩展）编码  
   \[
