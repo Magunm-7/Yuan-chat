@@ -4,9 +4,10 @@
 - 输出参数：
 评估器会对人说的话赋予额外三个参数：μ，σ，α
 
-# 多模态证据融合与状态估计
+# 多模态证据融合与状态估计（GitHub README 友好版）
 
-> 目标：对每个 *human turn* 片段，从文本/语音/视频三种模态提取特征，并进行门控融合，输出可解释的状态估计（均值/不确定性/模态权重）。
+> 目标：对每个 *human turn* 片段，从 **文本/语音/视频** 三种模态提取特征，并进行门控融合，输出可解释的状态估计（均值/不确定性/模态权重）。  
+> 说明：本版本为 **GitHub README 稳定显示**，不依赖 LaTeX 渲染；必要的上下标用 `<sub>/<sup>`。
 
 ---
 
@@ -15,40 +16,32 @@
 对一个 human turn 片段，针对三个模态提取特征：
 
 - **文字**：内容编码 `encode`  
-  \[
-  \text{encode}(\text{text}) \rightarrow h_t^{\text{text}}
-  \]
+  `encode(text) → h_t^text`  
+  即：h<sub>t</sub><sup>text</sup>
 
-- **语音**：时间段 \([t_0, t_1]\)（可加 \(\pm \delta\) 扩展）编码  
-  \[
-  \text{encode}(\text{audio}_{[t_0,\,t_1]}) \rightarrow h_t^{\text{audio}}
-  \]
+- **语音**：时间段 `[t0, t1]`（可加 `±δ` 扩展）编码  
+  `encode(audio[t0,t1]) → h_t^audio`  
+  即：h<sub>t</sub><sup>audio</sup>
 
-- **视频**：时间段 \([t_0-\delta,\, t_1+\delta]\) 编码  
-  \[
-  \text{encode}(\text{video}_{[t_0-\delta,\,t_1+\delta]}) \rightarrow h_t^{\text{video}}
-  \]
+- **视频**：时间段 `[t0-δ, t1+δ]` 编码  
+  `encode(video[t0-δ,t1+δ]) → h_t^video`  
+  即：h<sub>t</sub><sup>video</sup>
 
 ---
 
-## 2. 初始化证据权重（模态门控融合）
+## 2. 模态证据权重（门控融合）
 
 定义模态证据权重（门控系数）：
 
-\[
-\alpha_t = (\alpha^{\text{text}},\;\alpha^{\text{aud}},\;\alpha^{\text{vid}})
-\]
+- α<sub>t</sub> = (α<sup>text</sup>, α<sup>aud</sup>, α<sup>vid</sup>)
 
 融合得到统一表征：
 
-\[
-h_t
-= \alpha_t^{\text{text}}\, h_t^{\text{text}}
-+ \alpha^{\text{aud}}\, h_t^{\text{aud}}
-+ \alpha^{\text{vid}}\, h_t^{\text{vid}}
-\]
+- h<sub>t</sub> = α<sup>text</sup> · h<sub>t</sub><sup>text</sup> + α<sup>aud</sup> · h<sub>t</sub><sup>aud</sup> + α<sup>vid</sup> · h<sub>t</sub><sup>vid</sup>
 
-解释性：\(h_t\) 是统一表征，\(\alpha_t\) 用于解释该步主要由哪个模态提供证据（哪种证据权重更大）。
+解释性：
+- h<sub>t</sub> 是统一表征
+- α<sub>t</sub> 用于解释：该步主要依赖哪个模态提供证据（哪个权重更大）
 
 ---
 
@@ -56,73 +49,57 @@ h_t
 
 将融合表征映射到时序隐变量：
 
-\[
-z_t = f(h_t)
-\quad\text{（把输出变为隐变量）}
-\]
+- z<sub>t</sub> = f(h<sub>t</sub>)  
+  （把融合后的输出映射为隐变量）
 
 异方差回归输出（均值与方差）：
 
-\[
-\mu_t = W_{\mu} z_t,\qquad
-\sigma_t^2 = \mathrm{softplus}(W_{\sigma} z_t)
-\]
+- μ<sub>t</sub> = W<sub>μ</sub> · z<sub>t</sub>
+- σ<sub>t</sub><sup>2</sup> = softplus(W<sub>σ</sub> · z<sub>t</sub>)
 
 一次前向输出包含：
-
-- \(\mu_t\)：状态估计均值（可用于趋势/变化判断）
-- \(\sigma_t^2\)：不确定性（方差）
-- \(\alpha_t\)：模态证据权重（可解释性）
+- μ<sub>t</sub>：状态估计均值（可用于趋势/变化判断）
+- σ<sub>t</sub><sup>2</sup>：不确定性（方差）
+- α<sub>t</sub>：模态证据权重（可解释性）
 
 ---
 
-## 4. 用 \(\mu_t\) 做对话“跨度/变化”判断（以 dep 为例）
+## 4. 用 μ 做对话“跨度/变化”判断（以 dep 为例）
 
 对连续 turn 的变化幅度：
 
-\[
-\Delta \mu_{t\to t+1} = \mu_{t+1} - \mu_t
-\]
+- Δμ<sub>t→t+1</sub> = μ<sub>t+1</sub> − μ<sub>t</sub>
 
-以 \(\mu^{\text{dep}}\)（例如 depression 维度）为例，可用阈值 \(\zeta\) 判断：
+以 μ<sup>dep</sup>（例如 depression 维度）为例，设阈值 ζ：
 
-- 若  
-  \[
-  \Delta \mu^{\text{dep}} < -\zeta
-  \]
-  则认为出现 **有效回复**（朝期望方向变化）
+- 若 Δμ<sup>dep</sup> < −ζ ：认为出现 **有效回复**（朝期望方向变化）
+- 若 Δμ<sup>dep</sup> >  ζ ：认为出现 **无效回复 / 反向变化**
 
-- 若  
-  \[
-  \Delta \mu^{\text{dep}} > \zeta
-  \]
-  则认为出现 **无效回复 / 反向变化**（原笔记处字迹略糊，此处按语义整理）
+> 注：原笔记此处字迹略糊，本版按语义做了“有效/无效（反向）”的整理。
 
 ---
 
-## 5. 用 \(\sigma_t\) 表达不确定性
+## 5. 用 σ 表达不确定性
 
-\[
-\sigma_t^2 \text{（或 } \sigma_t \text{）越大} \Rightarrow \text{模型对该步估计越不确定}
-\]
+σ<sub>t</sub><sup>2</sup>（或 σ<sub>t</sub>）越大 ⇒ 模型对该步估计越不确定。
 
-直观解释（笔记语义）：
-
-- 如果 \(\sigma_t\) 很大，说明估计器对新信息不确定；
+直观解释（对应笔记语义）：
+- 如果 σ 很大，说明估计器对新信息不确定；
 - 可能意味着该段对话存在异常，或对应不同的心理/对话模式。
 
 ---
 
-## 6. 用 \(\alpha_t\) 做模态依赖解释与数据平衡
+## 6. 用 α 做模态依赖解释与数据平衡
 
-\(\alpha_t\) 可以解释该步主要依赖哪种模态证据，例如：
+α<sub>t</sub> 用于解释该步主要依赖哪种模态证据，例如：
 
-- 若 \(\alpha^{\text{vid}}\) 很高，但该段视频处于人脸模糊/遮挡期，则可能是可疑样本（高视频权重但视频质量差）。
+- 若 α<sup>vid</sup> 很高，但该段视频处于人脸模糊/遮挡期  
+  ⇒ 可能是可疑样本（高视频权重但视频质量差，证据不可靠）
 
 也可用于数据策略与训练平衡：
 
-- 利用 \(\alpha\) 识别并采样更多 **audio-dominant** 或 **video-dominant** 样本，
-- 从而促进三模态在训练中的贡献更均衡，避免模型偏向单一模态。
+- 利用 α 识别并采样更多 **audio-dominant** 或 **video-dominant** 样本，
+- 从而促进三模态在训练中的贡献更均衡，避免模型过度偏向单一模态。
 
 ---
 	​
