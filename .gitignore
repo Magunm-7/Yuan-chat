@@ -1,0 +1,15 @@
+# data & model artifacts (kept locally, not in git)
+data/
+outputs/
+models/
+*.pt
+*.npz
+*.wav
+*.mp4
+*.safetensors
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
