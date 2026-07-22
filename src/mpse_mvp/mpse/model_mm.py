@@ -19,10 +19,11 @@ import torch.nn.functional as F
 class MPSE_MM(nn.Module):
     def __init__(self, dims: dict[str, int], modalities: tuple[str, ...],
                  hidden: int = 256, num_idx: int = 1, gru_layers: int = 1, dropout: float = 0.1,
-                 use_gru: bool = True):
+                 use_gru: bool = True, use_sigmoid: bool = True):
         super().__init__()
         self.mods = tuple(modalities)
         self.use_gru = use_gru
+        self.use_sigmoid = use_sigmoid
         self.proj = nn.ModuleDict({
             m: nn.Sequential(nn.Linear(dims[m], hidden), nn.ReLU(), nn.Dropout(dropout))
             for m in self.mods
@@ -41,7 +42,8 @@ class MPSE_MM(nn.Module):
         alpha = torch.sigmoid(self.alpha_head(cat))             # (B,T,M) independent gates
         fused = (stack * alpha.unsqueeze(-1)).sum(dim=2)        # (B,T,H)
         out = self.gru(fused)[0] if self.use_gru else fused    # (B,T,H)
-        mu = torch.sigmoid(self.mu_head(out))                  # (B,T,num_idx) in [0,1]
+        raw_mu = self.mu_head(out)
+        mu = torch.sigmoid(raw_mu) if self.use_sigmoid else raw_mu   # (B,T,num_idx)
         logvar = torch.clamp(self.logvar_head(out), -6.0, 2.0)
         sigma = torch.exp(0.5 * logvar)
         return mu, sigma, alpha, logvar

@@ -478,6 +478,15 @@ MPSE 输出 3 维 α (T/A/V)，`cache_builder` 只取 (A, V) 两维缩放前缀�
 - [x] premise 实测（§6.8）+ 架构锁定：序列估计器 + 轨迹形状 + σ 双重角色
 - [x] 评估与架构方案 v2 落盘（`docs/eval-design.md`）
 
+### ★ chg 瓶颈定位（2026-07-22，测试驱动,纠正两次误判）
+测试推翻了我先后两个假设,收敛到真正病因:
+- ~~"MiniLM 特征上限 0.61"~~：错。监督线性探针 MiniLM→gold = **0.664**(早前 0.608 测量有误)。
+- ~~"MPSE 架构欠拟合"~~：错。**阶梯诊断**(ridge→线性→MLP→sigmoid→NLL→GRU)全是 ~0.58,**完整 MPSE 0.590 反而最高**,没有任何一环掉。架构没问题。
+- **真病因:弱标签 chg_weak**。文本探针(训练目标=chg_weak,评估 vs gold):MiniLM 0.586 / mpnet 0.605 / bart 0.621。全部 << 训练目标=gold 的 0.66–0.70。
+  → chg_weak 直接对 gold 是 0.667,但"学它"只能到 ~0.6,gap ~0.08 是**弱监督固有代价**。
+- **结论**:chg 在弱监督下天花板 ~0.62(bart 特征取上沿)。换 bart 编码器 +0.035(小修,值得但非质变)。要更高只能提升 chg_weak 弱标签质量(更强 rater),或接受 ~0.62。
+- **教训**:测试驱动拦下两次白费力气(重构模型 / 堆大编码器)。落盘胜过猜。
+
 ### 服务器现状（AutoDL，2026-07-22）
 - 实例：`autodl-mpse`（SSH 别名已配，VSCode 可直连，密钥免密码）。西北B区,vGPU-32GB(物理 4080S 16G + 超分,CUDA 见 32GB),数据盘 250G。
 - 镜像 PyTorch 2.1.2+cu121 / py3.10 / CUDA 可用。`scripts/setup_server.sh` 装通,**`smoke_test.sh` 全绿**(torch/GPU/Whisper/CLIP/MediaPipe/librosa/项目导入)。编码器已缓存在 `/root/autodl-tmp/hf`(1.5G)。
@@ -520,6 +529,15 @@ MPSE 输出 3 维 α (T/A/V)，`cache_builder` 只取 (A, V) 两维缩放前缀�
 - A. 换强文本编码器让 chg≈0.667,主线改讲 **σ 校准(H3)+ 轨迹(H2)**,如实报告"chg 上多模态无增益"。
 - B. 多模态价值移到**生成器**(音视频语境→更好回复,perplexity)。
 - C.(有意思)测**多模态状态(chg+aro+val)的轨迹**能否比 chg-only 更好地区分 mi_quality(gold)。→ 多模态用"质量区分"证明价值,绕开"aro/val 无 gold"。gold=mi_quality 是现成的。
+
+### Option C 初步结果（2026-07-22）
+多维 MPSE(chg+aro+val)训好,袋外 CV。**多模态状态轨迹 → mi_quality 区分**:
+- chg-only: AUC 0.538 [CI 0.37, 0.71]
+- chg+aro+val: AUC **0.591** [CI 0.40, 0.77]
+- 差 **+0.053**,方向正确(多模态有帮助)。
+⚠️ 但 CI 重叠严重(15 low / 104 session),**未达显著**。功效不足(low 仅 23),初步信号非定论。
+增强方向:① 换强文本编码器(chg 基线现 0.592,受 MiniLM 0.61 上限压制);② aro/val 弱标签较粗(尤其 val 的 smile 几何),可改用面部情感模型/更好韵律;③ 数据功效受限(low 少),难解。
+遗留:eval h1/h3 符号约定(旧"低=change" vs 现"高=change")待统一;train HEADLINE 和 option-C 内部已用正确约定。
 
 ### 本机环境（重要）
 `C:\Users\qmn20` 是裸 Windows：**只有 numpy，无 torch/transformers/ffmpeg/yt-dlp**。
