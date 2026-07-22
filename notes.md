@@ -478,6 +478,15 @@ MPSE 输出 3 维 α (T/A/V)，`cache_builder` 只取 (A, V) 两维缩放前缀�
 - [x] premise 实测（§6.8）+ 架构锁定：序列估计器 + 轨迹形状 + σ 双重角色
 - [x] 评估与架构方案 v2 落盘（`docs/eval-design.md`）
 
+### 服务器现状（AutoDL，2026-07-22）
+- 实例：`autodl-mpse`（SSH 别名已配，VSCode 可直连，密钥免密码）。西北B区,vGPU-32GB(物理 4080S 16G + 超分,CUDA 见 32GB),数据盘 250G。
+- 镜像 PyTorch 2.1.2+cu121 / py3.10 / CUDA 可用。`scripts/setup_server.sh` 装通,**`smoke_test.sh` 全绿**(torch/GPU/Whisper/CLIP/MediaPipe/librosa/项目导入)。编码器已缓存在 `/root/autodl-tmp/hf`(1.5G)。
+- **网络约束(国内)**:
+  - HF 模型:直连被墙 → `HF_ENDPOINT=hf-mirror.com` + `HF_HUB_DISABLE_XET` 或 `source /etc/network_turbo`(学术代理)可下。已验证。
+  - YouTube 视频:服务器学术代理走不通(MITM 自签证书 + 503 限流)。**改在用户本机下载**(用户人在国外,直连 YouTube)→ scp 上传服务器。
+- **视频下载方案(已跑通)**:用户本机 `python scripts/download_annomi_videos.py --skip_wav --format "best[height<=480]/best"`(渐进式单文件,~360p,不需要 ffmpeg,~13M/个、131 个共 ~1.5G),下完 scp 到服务器,服务器用 ffmpeg 抽 wav。脚本已加 `--skip_wav`/`--format`/`--insecure` 开关、yt-dlp 用 `python -m yt_dlp` 调用(免 PATH 依赖)。
+- ⚠️ 用户明确:**评估器就是为多模态设计的,视频不能砍**。所以不走"纯文本版",直接奔多模态。文本 H1 只作为 baseline 顺带产出。
+
 ### 本机环境（重要）
 `C:\Users\qmn20` 是裸 Windows：**只有 numpy，无 torch/transformers/ffmpeg/yt-dlp**。
 → 所有 torch/模型/编码/训练代码都得在**租的 H800 服务器**上跑，本机只能写+跑纯 numpy/csv 逻辑。
