@@ -487,6 +487,40 @@ MPSE 输出 3 维 α (T/A/V)，`cache_builder` 只取 (A, V) 两维缩放前缀�
 - **视频下载方案(已跑通)**:用户本机 `python scripts/download_annomi_videos.py --skip_wav --format "best[height<=480]/best"`(渐进式单文件,~360p,不需要 ffmpeg,~13M/个、131 个共 ~1.5G),下完 scp 到服务器,服务器用 ffmpeg 抽 wav。脚本已加 `--skip_wav`/`--format`/`--insecure` 开关、yt-dlp 用 `python -m yt_dlp` 调用(免 PATH 依赖)。
 - ⚠️ 用户明确:**评估器就是为多模态设计的,视频不能砍**。所以不走"纯文本版",直接奔多模态。文本 H1 只作为 baseline 顺带产出。
 
+### 弱标签定夺
+- **chg 弱标签**:词典(MI DARN-C 词表)实测太弱——76% turn 得分 0、AUC 仅 0.58(<0.6 可用线)。→ **改用模型**(zero-shot NLI，如 bart-large-mnli，"想改变 vs 不想"打分)。避免了用死标签训出死模型。
+- aro:音频韵律(现成)。val/eng:面部(MediaPipe),待视频到位后跑维度探针定去留。
+- 注意:gold talk_type 只作评估,**绝不进训练**(否则泄漏)。
+- chg zero-shot(bart-large-mnli)实测:**AUC 0.667**(词典 0.58),可用。写在 `data/annomi/turns_chg.jsonl`。
+
+### ★ 成功判据的重新定义(2026-07-22)
+弱标签是**文本**的(AUC 0.667)。MPSE 的价值不是复制它,是用**多模态 + GRU 时序去噪**。
+→ **核心判据:μ_chg(多模态+时序,在 0.667 噪声弱标签上训)对 gold 的 AUC 能否 > 0.667。**
+能 = 模型加了信息(多模态融合 + 时序平滑),非循环、且证成 GRU+多模态架构的必要性(呼应 F5)。
+配套对照:文本-only MPSE 的 μ vs gold,看多模态相对纯文本涨多少。
+⚠️ 潜在诚实结果:chg 高度语义化(文本主导),多模态对 chg 可能提升有限——那也是如实报告的发现,不强凑。
+
+### ★ 第一次端到端结果 + 战略性发现（2026-07-22）
+**里程碑**:AnnoMI → 三模态特征(text MiniLM384 / audio Whisper768 / video CLIP768) → MPSE(GRU+sigmoidα+异方差) → H1/H2/H3,**整条端到端跑通**,128 session/2933 turn。
+
+**结果(chg,袋外 CV,AUC=区分 change vs sustain)**:
+| | AUC vs gold | μ std |
+|---|---|---|
+| bart 弱标签(训练目标) | 0.667 | 0.19 |
+| MPSE 多模态 | **0.592** | 0.12 |
+| MPSE 纯文本 | 0.590 | 0.12 |
+| MiniLM→gold 监督线性探针(上界) | **0.608** | — |
+
+**两个确认的发现**:
+1. **MiniLM 文本编码器是瓶颈**:监督上界仅 0.608 < 弱标签 0.667。MPSE 0.59 贴着这个上界,不是欠拟合。GRU/无GRU、NLL/MSE 四种消融全是 ~0.59 → 与架构无关。→ **需换强文本编码器**(bart 自身 embedding / LLM),chg 才能逼近 0.667。
+2. **多模态对 chg 没用**(0.592≈0.590):chg 是文本语义构念,音视频不携带"改变意愿"语义。
+
+**★ 战略性张力(核心)**:唯一有 gold 验证的维度(chg)是**文本主导**,多模态帮不上;而多模态能帮的维度(aro 韵律 / val 面部)在 AnnoMI **没有 gold**。→ "多模态在 chg 上胜过文本"这个主张,数据说它**不成立**。
+**破局候选**:
+- A. 换强文本编码器让 chg≈0.667,主线改讲 **σ 校准(H3)+ 轨迹(H2)**,如实报告"chg 上多模态无增益"。
+- B. 多模态价值移到**生成器**(音视频语境→更好回复,perplexity)。
+- C.(有意思)测**多模态状态(chg+aro+val)的轨迹**能否比 chg-only 更好地区分 mi_quality(gold)。→ 多模态用"质量区分"证明价值,绕开"aro/val 无 gold"。gold=mi_quality 是现成的。
+
 ### 本机环境（重要）
 `C:\Users\qmn20` 是裸 Windows：**只有 numpy，无 torch/transformers/ffmpeg/yt-dlp**。
 → 所有 torch/模型/编码/训练代码都得在**租的 H800 服务器**上跑，本机只能写+跑纯 numpy/csv 逻辑。
