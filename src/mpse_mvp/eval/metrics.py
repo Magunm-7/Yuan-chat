@@ -2,13 +2,13 @@
 Pure-numpy metrics for MPSE evaluation (no torch / scipy dependency, so it runs
 anywhere). Used by eval/h1.py and eval/h3.py.
 
-talk_type ordinal: change=-1, neutral=0, sustain=+1 (aligned with mu; lower = more
-change-oriented). See docs/eval-design.md 3.
+Convention (unified 2026-07-22): HIGHER mu = MORE change-oriented, matching the
+chg weak label. talk ordinal: change=+1, neutral=0, sustain=-1.
 """
 from __future__ import annotations
 import numpy as np
 
-TALK_SCORE = {"change": -1, "neutral": 0, "sustain": +1}
+TALK_SCORE = {"change": +1, "neutral": 0, "sustain": -1}
 
 
 def _rankdata(a: np.ndarray) -> np.ndarray:
@@ -83,6 +83,52 @@ def talk_ordinal(talk_types) -> np.ndarray:
     return np.array([TALK_SCORE[t] for t in talk_types], dtype=float)
 
 
+def prf_best(scores, labels):
+    """
+    Precision / recall / F1 at the threshold that maximizes F1 (higher score =>
+    label 1). Returns (precision, recall, f1, threshold). In-sample operating
+    point (report as such). nan if only one class.
+    """
+    scores = np.asarray(scores, dtype=float)
+    labels = np.asarray(labels).astype(int)
+    P = int(labels.sum())
+    if P == 0 or P == len(labels):
+        return float("nan"), float("nan"), float("nan"), float("nan")
+    order = np.argsort(-scores)
+    y = labels[order]
+    s = scores[order]
+    tp = np.cumsum(y)
+    fp = np.cumsum(1 - y)
+    prec = tp / (tp + fp)
+    rec = tp / P
+    f1 = 2 * prec * rec / (prec + rec + 1e-12)
+    i = int(np.argmax(f1))
+    return float(prec[i]), float(rec[i]), float(f1[i]), float(s[i])
+
+
+def balanced_best(scores, labels):
+    """
+    Operating point that maximizes BALANCED accuracy (mean of TPR and TNR) — the
+    right choice for imbalanced classes where max-F1 collapses to all-positive.
+    Returns (balanced_acc, precision, recall, f1, threshold).
+    """
+    scores = np.asarray(scores, dtype=float)
+    labels = np.asarray(labels).astype(int)
+    P = int(labels.sum()); N = len(labels) - P
+    if P == 0 or N == 0:
+        return (float("nan"),) * 5
+    order = np.argsort(-scores)
+    y = labels[order]; s = scores[order]
+    tp = np.cumsum(y); fp = np.cumsum(1 - y)
+    tpr = tp / P; tnr = (N - fp) / N
+    bacc = (tpr + tnr) / 2
+    i = int(np.argmax(bacc))
+    prec = tp[i] / (tp[i] + fp[i] + 1e-12)
+    rec = tpr[i]
+    f1 = 2 * prec * rec / (prec + rec + 1e-12)
+    return float(bacc[i]), float(prec), float(rec), float(f1), float(s[i])
+
+
 # ------------------------------------------------------------------ self-test
 def make_synthetic_predictions(seed=0, n_sessions=40, signal=0.8):
     """
@@ -101,10 +147,10 @@ def make_synthetic_predictions(seed=0, n_sessions=40, signal=0.8):
             p_change = 0.15 + (0.4 * t / n_turns if quality == "high" else 0.1)
             u = rng.rand()
             tt = "change" if u < p_change else ("sustain" if u > 0.85 else "neutral")
-            ord_ = TALK_SCORE[tt]
+            ord_ = TALK_SCORE[tt]  # change=+1
             sigma = float(rng.uniform(0.05, 0.5))
             noise = rng.randn() * sigma * 2.0
-            mu = 0.3 + signal * ord_ * 0.15 + noise  # lower mu <-> change
+            mu = 0.5 + signal * ord_ * 0.15 + noise  # HIGHER mu <-> change
             rows.append({
                 "session_id": f"S{s}", "turn_id": t + 1, "mi_quality": quality,
                 "talk_type": tt, "mu": {"chg": float(mu)}, "sigma": {"chg": sigma},
@@ -116,10 +162,12 @@ if __name__ == "__main__":
     rows = make_synthetic_predictions()
     mu = np.array([r["mu"]["chg"] for r in rows])
     ordv = talk_ordinal([r["talk_type"] for r in rows])
-    print("self-test on synthetic data:")
+    print("self-test on synthetic data (HIGH mu = change):")
     print(f"  spearman(mu, talk_ord) = {spearman(mu, ordv):+.3f}  (expect > 0)")
     mask = np.array([r["talk_type"] in ("change", "sustain") for r in rows])
     lab = np.array([1 if r["talk_type"] == "change" else 0 for r in rows])[mask]
-    print(f"  auc(-mu -> change)     = {auc(-mu[mask], lab):.3f}  (expect > 0.6)")
+    print(f"  auc(mu -> change)      = {auc(mu[mask], lab):.3f}  (expect > 0.6)")
+    p, r, f1, thr = prf_best(mu[mask], lab)
+    print(f"  P/R/F1(change) @bestF1 = {p:.2f}/{r:.2f}/{f1:.2f} (thr={thr:.2f})")
     shuf = mu.copy(); np.random.RandomState(1).shuffle(shuf)
     print(f"  spearman(shuffled)     = {spearman(shuf, ordv):+.3f}  (expect ~0)")

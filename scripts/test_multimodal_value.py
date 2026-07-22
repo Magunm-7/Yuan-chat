@@ -10,7 +10,7 @@ them to mi_quality under session CV. Compare feature set {chg} vs {chg,aro,val}.
 from __future__ import annotations
 import json, argparse
 import numpy as np
-from mpse_mvp.eval.metrics import auc, spearman, bootstrap_ci
+from mpse_mvp.eval.metrics import auc, spearman, bootstrap_ci, prf_best
 
 
 def shape_features(mu: np.ndarray) -> list[float]:
@@ -70,20 +70,21 @@ def main():
     preds = [json.loads(l) for l in open(args.pred, encoding="utf-8")]
     splits = json.load(open(args.splits, encoding="utf-8"))
 
-    print("=== Option C: multimodal state trajectory -> MI quality ===")
+    print("=== Option C: multimodal state trajectory -> MI quality (detect LOW) ===")
     results = {}
     for name, dims in [("chg-only", ["chg"]), ("chg+aro+val", ["chg", "aro", "val"])]:
         X, y, sids = session_matrix(preds, dims, args.min_turns)
         a, oof, ok = ridge_cv_auc(X, y, sids, splits)
-        # bootstrap CI over sessions
         yy, pp = y[ok], oof[ok]
         point, lo, hi = bootstrap_ci(np.arange(len(yy)), lambda ii: auc(pp[ii], yy[ii]))
+        prec, rec, f1, thr = prf_best(pp, yy)   # detect low-quality (minority)
         results[name] = (a, lo, hi)
-        print(f"  {name:12s}: AUC={a:.3f}  [95% CI {lo:.3f}, {hi:.3f}]  "
-              f"({int(y.sum())} low / {len(y)} sessions, {X.shape[1]} feats)")
+        print(f"  {name:12s}: AUC={a:.3f} [CI {lo:.3f},{hi:.3f}]  "
+              f"P/R/F1(low)={prec:.2f}/{rec:.2f}/{f1:.2f}  "
+              f"({int(y.sum())} low / {len(y)} sess, {X.shape[1]} feats)")
 
     d = results["chg+aro+val"][0] - results["chg-only"][0]
-    print(f"\n  multimodal - chg-only = {d:+.3f}  "
+    print(f"\n  multimodal - chg-only (AUC) = {d:+.3f}  "
           f"({'multimodal helps' if d > 0.02 else 'no clear gain'})")
 
 

@@ -549,7 +549,7 @@ MPSE 输出 3 维 α (T/A/V)，`cache_builder` 只取 (A, V) 两维缩放前缀�
 - 差 **+0.053**,方向正确(多模态有帮助)。
 ⚠️ 但 CI 重叠严重(15 low / 104 session),**未达显著**。功效不足(low 仅 23),初步信号非定论。
 增强方向:① 换强文本编码器(chg 基线现 0.592,受 MiniLM 0.61 上限压制);② aro/val 弱标签较粗(尤其 val 的 smile 几何),可改用面部情感模型/更好韵律;③ 数据功效受限(low 少),难解。
-遗留:eval h1/h3 符号约定(旧"低=change" vs 现"高=change")待统一;train HEADLINE 和 option-C 内部已用正确约定。
+✅ eval 符号已统一(高 μ=change);已加 precision/recall/F1 + 平衡准确率。
 
 ### 本机环境（重要）
 `C:\Users\qmn20` 是裸 Windows：**只有 numpy，无 torch/transformers/ffmpeg/yt-dlp**。

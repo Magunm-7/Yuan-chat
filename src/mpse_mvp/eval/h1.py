@@ -45,17 +45,20 @@ def session_spearmans(rows, min_turns=5):
     return out
 
 
-def pooled_auc_change_sustain(rows):
-    """AUC(-mu_chg -> change vs sustain), pooled. Higher -mu => change."""
+def _change_sustain(rows):
     mu, lab = [], []
     for r in rows:
         if r["talk_type"] == "change":
             lab.append(1); mu.append(r["mu"]["chg"])
         elif r["talk_type"] == "sustain":
             lab.append(0); mu.append(r["mu"]["chg"])
-    if not mu:
-        return float("nan")
-    return auc(-np.asarray(mu), np.asarray(lab))
+    return np.asarray(mu), np.asarray(lab)
+
+
+def pooled_auc_change_sustain(rows):
+    """AUC(mu_chg -> change vs sustain), pooled. HIGHER mu => change."""
+    mu, lab = _change_sustain(rows)
+    return auc(mu, lab) if len(mu) else float("nan")
 
 
 def permutation_p(rows, n_perm=1000, seed=0):
@@ -104,9 +107,20 @@ def evaluate(rows, splits=None):
 
     obs_auc, p = permutation_p(rows)
     print(f"  permutation (within-session shuffle): auc={obs_auc:.3f}  p={p:.4f}")
+
+    # classification view: change vs sustain at the BALANCED operating point
+    # (max-F1 collapses to all-change because change is the majority here)
+    from mpse_mvp.eval.metrics import balanced_best
+    mu, lab = _change_sustain(rows)
+    bacc, prec, rec, f1, thr = balanced_best(mu, lab)
+    n_chg, n_sus = int(lab.sum()), int((lab == 0).sum())
+    print(f"  change-vs-sustain ({n_chg} change / {n_sus} sustain): "
+          f"balanced-acc={bacc:.3f}  P={prec:.3f} R={rec:.3f} F1={f1:.3f} (thr={thr:.3f})")
+
     verdict = "PASS" if (obs_auc > 0.60 and p < 0.05) else "FAIL"
     print(f"  judgment (auc>0.60 & p<0.05): {verdict}")
-    return {"auc": obs_auc, "p": p, "verdict": verdict}
+    return {"auc": obs_auc, "p": p, "balanced_acc": bacc,
+            "precision": prec, "recall": rec, "f1": f1, "verdict": verdict}
 
 
 def main():
