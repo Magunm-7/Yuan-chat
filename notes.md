@@ -487,6 +487,18 @@ MPSE 输出 3 维 α (T/A/V)，`cache_builder` 只取 (A, V) 两维缩放前缀�
 - **结论**:chg 在弱监督下天花板 ~0.62(bart 特征取上沿)。换 bart 编码器 +0.035(小修,值得但非质变)。要更高只能提升 chg_weak 弱标签质量(更强 rater),或接受 ~0.62。
 - **教训**:测试驱动拦下两次白费力气(重构模型 / 堆大编码器)。落盘胜过猜。
 
+### ★ 强标签后 Option C 翻倍（2026-07-22）
+换强 rater(aro=audeering wav2vec2 arousal;val=ASD 选来访者脸+FER valence)重训后:
+| | chg-only | chg+aro+val | 差 |
+|---|---|---|---|
+| 粗糙标签(旧) | 0.538 | 0.591 | +0.053 |
+| **强标签(新)** | 0.524 | **0.631** | **+0.107** |
+- 多模态优势翻倍(+0.05→+0.11),坐实"crude 标签是限制"。chg 也 0.59→0.611。
+- 强标签动态范围:aro std 0.14、val std 0.18(旧 val 0.22 但打错人)。
+- **val 效度:73% 的 turn 能 ASD 可靠锁定来访者脸**(27% 两人同框/离画,标不可用)。
+- 诚实边界:两 CI 仍重叠(23 low 功效硬上限),严格显著够不着;但效应量翻倍是实的。待补:对配对差值直接 bootstrap（比 CI-overlap 更接近真实显著性）。
+- **结论:多模态价值在 A 段(评估器)已拿到有分量的正面证据。** 可转 B 段(多模态 LoRA)。
+
 ### 服务器现状（AutoDL，2026-07-22）
 - 实例：`autodl-mpse`（SSH 别名已配，VSCode 可直连，密钥免密码）。西北B区,vGPU-32GB(物理 4080S 16G + 超分,CUDA 见 32GB),数据盘 250G。
 - 镜像 PyTorch 2.1.2+cu121 / py3.10 / CUDA 可用。`scripts/setup_server.sh` 装通,**`smoke_test.sh` 全绿**(torch/GPU/Whisper/CLIP/MediaPipe/librosa/项目导入)。编码器已缓存在 `/root/autodl-tmp/hf`(1.5G)。
