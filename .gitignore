@@ -1,7 +1,8 @@
 # data & model artifacts (kept locally, not in git)
-data/
-outputs/
-models/
+# anchored to repo root so src/mpse_mvp/data/ (source code) is NOT ignored
+/data/
+/outputs/
+/models/
 *.pt
 *.npz
 *.wav
