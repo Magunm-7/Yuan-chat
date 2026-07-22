@@ -32,6 +32,35 @@
 
 ---
 
+## 0.2 B 段起步 handoff（compact / 新会话后直接照这个走）
+
+**当前进度**：A 段(评估器)完成并验证；**下一步 = B 段(多模态 LoRA 生成器)**，还没开始。
+
+**连服务器**：`ssh autodl-mpse`（SSH 别名已配、密钥免密）。代码在 `/root/Yuan-chat`；数据/产物在 repo 的 `data/annomi/`（gitignore，只在服务器和本机，不在 GitHub）。
+**每次跑前**：`source /root/miniconda3/etc/profile.d/conda.sh && conda activate base`
+**环境变量（国内网络关键）**：
+- 用已缓存模型：`export HF_HUB_OFFLINE=1 HF_HOME=/root/autodl-tmp/hf`
+- 要下新 HF 模型：`source /etc/network_turbo; export HF_HOME=/root/autodl-tmp/hf HF_HUB_DISABLE_XET=1`（hf.co 被墙→走学术代理，Xet CDN 连不上→必须关 xet）
+- YouTube 视频只能在**本机**下（用户在国外）再 scp 上传；服务器下不了。
+
+**B 段现有输入（服务器上都齐，不用重造）**：
+- 咨询师回复(SFT 目标)：`data/annomi/turns_labeled.jsonl` 每行的 `therapist_reply`
+- 音视频 embedding(前缀输入)：`data/annomi/feats/*.npz`（`audio_emb`768 / `video_emb`768 / `text_emb`384 + q_*）
+- σ 样本权重 + μ 状态：`data/annomi/pred_mm2.jsonl`（每 turn `mu`/`sigma` 含 chg/aro/val）
+- wav / 视频原件：`data/annomi/{wav,video}/`（128 段）
+
+**B 段计划**：改继承来的 `src/mpse_mvp/mm/train_mm_sft.py` 喂 AnnoMI——冻结 7–8B base + LoRA(q/k/v/o) + `SoftTokenProjector` 把 audio/video 池化成前缀软 token、α 门控、σ 做样本权重、目标是 `therapist_reply`。产物 `mm_prefix.pt` + `lora_adapter` = **多模态权重**（用户心心念念的最终产物）。
+**基模**：迭代用 **7–8B**（这台 vGPU 物理 16G 装得下，一 epoch ~15–40 min；**14B bf16 会溢出到主机内存、奇慢**，展示版另租真 ≥32G 卡）。具体 7–8B 型号待联网挑（**用户不要量化 QLoRA**）。
+**B 段评估**：held-out perplexity（只算 assistant token）+ 定性样例，对比**纯文本 LoRA baseline**（关掉前缀）。
+
+**评估 recipe（高 μ=change 约定，已统一）**：
+- `python -m mpse_mvp.eval.h1 --pred data/annomi/pred_mm2.jsonl --splits data/annomi/splits.json`
+- `python scripts/test_multimodal_value.py --pred data/annomi/pred_mm2.jsonl`
+
+**A 段结论（已定，别重跑去"验证"）**：H1 chg AUC 0.615 / p=0.001 / bal-acc 0.584（P0.74 R0.56 F1 0.64）；Option C 多模态 0.631 vs 纯文本 0.524（+0.107，抓 low 质量精度 0.18→0.33）。功效受 23 个 low session 硬上限限制。
+
+---
+
 ## 1. 协作方式（用户偏好，先看）
 
 - 用户（孟楠）吃**直接、不和稀泥的校准**，该说 no 就说 no，别给安慰剂。
