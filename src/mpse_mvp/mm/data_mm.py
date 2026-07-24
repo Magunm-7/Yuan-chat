@@ -14,11 +14,21 @@ def _apply_chat_template(tokenizer, messages, add_generation_prompt: bool):
     so its token length can be used to mask labels.
     """
     if hasattr(tokenizer, "apply_chat_template"):
-        return tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=add_generation_prompt,
-        )
+        # Qwen3: force non-thinking (no <think> block) for short MI replies.
+        # Qwen2.5's template has no such flag; it simply ignores the extra kwarg.
+        try:
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+                enable_thinking=False,
+            )
+        except TypeError:
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+            )
 
     # fallback: simple text format
     parts = []
@@ -52,16 +62,13 @@ def _build_prompt_and_full(tokenizer, messages, max_len: int):
       - full_text:  system+user+assistant, add_generation_prompt=False
       - labels: full_ids, but labels[:len(prompt_ids)] = -100
     """
-    # split into prefix (everything before assistant content) and full messages
-    prefix_msgs = []
-    assistant_msg = None
-    for m in messages:
+    # target = the LAST assistant turn; everything before it is prompt (history assistants stay masked)
+    last_idx = -1
+    for j, m in enumerate(messages):
         if m.get("role") == "assistant":
-            assistant_msg = m
-            break
-        prefix_msgs.append(m)
+            last_idx = j
 
-    if assistant_msg is None:
+    if last_idx < 0:
         # no assistant message -> train nothing (all -100)
         full_text = _apply_chat_template(tokenizer, messages, add_generation_prompt=False)
         full_ids, full_attn = _encode_text(tokenizer, full_text, max_len)
@@ -69,18 +76,22 @@ def _build_prompt_and_full(tokenizer, messages, max_len: int):
         labels[:] = -100
         return full_ids, full_attn, labels
 
+    prefix_msgs = messages[:last_idx]
+    full_msgs = messages[:last_idx + 1]
     prompt_text = _apply_chat_template(tokenizer, prefix_msgs, add_generation_prompt=True)
-    full_text = _apply_chat_template(tokenizer, messages, add_generation_prompt=False)
+    full_text = _apply_chat_template(tokenizer, full_msgs, add_generation_prompt=False)
 
-    # Encode full first (final truncation target)
-    full_ids, full_attn = _encode_text(tokenizer, full_text, max_len)
+    # true (untruncated) lengths -> exact target token count = full - prompt
+    full_full = tokenizer(full_text, return_tensors="pt", truncation=False)["input_ids"][0]
+    prompt_full = tokenizer(prompt_text, return_tensors="pt", truncation=False)["input_ids"][0]
+    n_target = max(1, int(full_full.shape[0]) - int(prompt_full.shape[0]))
 
-    # Encode prompt, but cap to full length for masking alignment
-    prompt_ids, _ = _encode_text(tokenizer, prompt_text, max_len)
-    prompt_len = min(int(prompt_ids.shape[0]), int(full_ids.shape[0]))
-
+    full_ids = full_full[-max_len:]           # LEFT-truncate: drop oldest history, keep target at the end
+    full_attn = torch.ones_like(full_ids)
     labels = full_ids.clone()
-    labels[:prompt_len] = -100
+    n_mask = int(full_ids.shape[0]) - n_target
+    if n_mask > 0:
+        labels[:n_mask] = -100                # mask everything except the last n_target (the reply)
     return full_ids, full_attn, labels
 
 
@@ -103,6 +114,8 @@ class MMCacheDataset(Dataset):
     def __init__(self, index_jsonl: str, tokenizer, max_len: int = 1024):
         self.items = _safe_load_jsonl(index_jsonl)
         self.tok = tokenizer
+        # truncate from the LEFT so long dialogues drop the OLDEST history, never the target reply
+        self.tok.truncation_side = "left"
         self.max_len = max_len
 
     def __len__(self):
@@ -111,25 +124,28 @@ class MMCacheDataset(Dataset):
     def __getitem__(self, i):
         it = self.items[i]
         npz = np.load(it["npz_path"])
-        audio = npz["audio_feat"].astype(np.float32)  # (Ca,)
-        video = npz["video_feat"].astype(np.float32)  # (Cv,)
         alpha = npz["alpha"].astype(np.float32)       # (2,)
         mu = npz["mu"].astype(np.float32)             # (M,)
 
         messages = it["messages"]
-
         input_ids, attn, labels = _build_prompt_and_full(self.tok, messages, self.max_len)
 
-        return {
+        out = {
             "input_ids": input_ids,
             "attention_mask": attn,
             "labels": labels,
-            "audio_feat": torch.from_numpy(audio),
-            "video_feat": torch.from_numpy(video),
             "alpha": torch.from_numpy(alpha),
             "mu": torch.from_numpy(mu),
             "sample_weight": torch.tensor(float(it.get("sample_weight", 1.0)), dtype=torch.float32),
         }
+        if "audio_seq" in npz:   # cross-attention path: sequences + text embedding
+            out["audio_seq"] = torch.from_numpy(npz["audio_seq"].astype(np.float32))
+            out["video_seq"] = torch.from_numpy(npz["video_seq"].astype(np.float32))
+            out["text_emb"] = torch.from_numpy(npz["text_emb"].astype(np.float32))
+        else:                    # pooled path
+            out["audio_feat"] = torch.from_numpy(npz["audio_feat"].astype(np.float32))
+            out["video_feat"] = torch.from_numpy(npz["video_feat"].astype(np.float32))
+        return out
 
 
 def collate_mm(batch, pad_token_id: int | None = None):
@@ -150,19 +166,23 @@ def collate_mm(batch, pad_token_id: int | None = None):
     attention_mask = torch.stack([pad1d(x["attention_mask"], pad_val=0) for x in batch], dim=0)
     labels = torch.stack([pad1d(x["labels"], pad_val=-100) for x in batch], dim=0)
 
-    audio_feat = torch.stack([x["audio_feat"] for x in batch], dim=0)
-    video_feat = torch.stack([x["video_feat"] for x in batch], dim=0)
     alpha = torch.stack([x["alpha"] for x in batch], dim=0)
     mu = torch.stack([x["mu"] for x in batch], dim=0)
     w = torch.stack([x["sample_weight"] for x in batch], dim=0)
 
-    return dict(
+    out = dict(
         input_ids=input_ids,
         attention_mask=attention_mask,
         labels=labels,
-        audio_feat=audio_feat,
-        video_feat=video_feat,
         alpha=alpha,
         mu=mu,
         sample_weight=w,
     )
+    if "audio_seq" in batch[0]:
+        out["audio_seq"] = torch.stack([x["audio_seq"] for x in batch], dim=0)
+        out["video_seq"] = torch.stack([x["video_seq"] for x in batch], dim=0)
+        out["text_emb"] = torch.stack([x["text_emb"] for x in batch], dim=0)
+    else:
+        out["audio_feat"] = torch.stack([x["audio_feat"] for x in batch], dim=0)
+        out["video_feat"] = torch.stack([x["video_feat"] for x in batch], dim=0)
+    return out

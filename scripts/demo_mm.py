@@ -5,7 +5,13 @@ from mpse_mvp.mm.train_mm_sft import load_mm_prefix
 def chat_text(tok, messages):
     # 用 chat template（如果有）
     if hasattr(tok, "apply_chat_template"):
-        return tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        # enable_thinking=False 让生成侧 prompt 与训练完全一致
+        # (Qwen3 会在这里放一个空 <think> 块; Qwen2.5 忽略该参数)
+        try:
+            return tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
+                                           enable_thinking=False)
+        except TypeError:
+            return tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     # fallback
     s=[]
     for m in messages:
@@ -13,18 +19,25 @@ def chat_text(tok, messages):
     return "\n".join(s) + "\nASSISTANT:"
 
 @torch.no_grad()
-def build_inputs_embeds(mm, input_ids, attention_mask, audio_feat, video_feat, alpha):
+def build_inputs_embeds(mm, input_ids, attention_mask, alpha, state=None,
+                        audio_feat=None, video_feat=None,
+                        text_emb=None, audio_seq=None, video_seq=None):
     B = input_ids.size(0)
     emb = mm.lm.get_input_embeddings()(input_ids)
 
-    a_tok = mm.audio_proj(audio_feat)   # (B,Ka,D)
-    v_tok = mm.video_proj(video_feat)   # (B,Kv,D)
-
-    if mm.use_alpha_gate and alpha is not None:
-        a_tok = a_tok * alpha[:,0].view(B,1,1)
-        v_tok = v_tok * alpha[:,1].view(B,1,1)
-
-    prefix = torch.cat([a_tok, v_tok], dim=1)  # (B,K,D)
+    if getattr(mm, "use_crossattn", False):
+        mm_tok = mm.fusion(text_emb, audio_seq, video_seq, alpha if mm.use_alpha_gate else None)
+        toks = [mm_tok]
+    else:
+        a_tok = mm.audio_proj(audio_feat)
+        v_tok = mm.video_proj(video_feat)
+        if mm.use_alpha_gate and alpha is not None:
+            a_tok = a_tok * alpha[:, 0].view(B, 1, 1)
+            v_tok = v_tok * alpha[:, 1].view(B, 1, 1)
+        toks = [a_tok, v_tok]
+    if getattr(mm, "state_proj", None) is not None and state is not None:
+        toks = [mm.state_proj(state)] + toks   # inject the (possibly overridden) evaluator state
+    prefix = torch.cat(toks, dim=1).to(emb.dtype)  # match emb dtype for the cat
     K = prefix.size(1)
 
     inputs_embeds = torch.cat([prefix, emb], dim=1)
@@ -47,6 +60,16 @@ def main():
     # 可选：显式指定 LoRA adapter 目录（如果你不想依赖 auto-detect / load_mm_prefix 的行为）
     ap.add_argument("--lora_adapter", default=None)
     ap.add_argument("--max_new_tokens", type=int, default=128)
+    ap.add_argument("--n", type=int, default=6)
+    ap.add_argument("--greedy", action="store_true", help="greedy decode (collapses to backchannels; sampling is default)")
+    ap.add_argument("--temperature", type=float, default=0.7)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--min_gold_words", type=int, default=0, help="only show turns whose gold reply has >= this many words")
+    ap.add_argument("--zero_alpha", action="store_true", help="silence the prefix (text-only demo)")
+    ap.add_argument("--sweep_dim", default=None, choices=["chg", "aro", "val"],
+                    help="state-controllability: hold input fixed, sweep this state dim")
+    ap.add_argument("--sweep_vals", default="0.1,0.9", help="comma values to set --sweep_dim to")
+    ap.add_argument("--diag_av", action="store_true", help="diagnostic: real vs zeroed audio/video prefix (is the prefix used at all?)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
@@ -56,7 +79,7 @@ def main():
 
     lm = AutoModelForCausalLM.from_pretrained(
         args.base_model_dir,
-        torch_dtype=torch.float16 if args.device.startswith("cuda") else torch.float32
+        torch_dtype=torch.bfloat16 if args.device.startswith("cuda") else torch.float32
     ).to(args.device)
 
     # 如果你传了 lora_adapter，就在这里手动加载（更确定）
@@ -76,14 +99,27 @@ def main():
     gen_lm.eval()
 
     items = [json.loads(l) for l in open(args.index_jsonl, encoding="utf-8")]
-    for it in items[:5]:  # demo：先跑前5条
+    if args.min_gold_words:  # showcase turns that call for a substantive reply (not backchannels)
+        def _gold_len(it):
+            m = it["messages"][-1]
+            return len(m["content"].split()) if m.get("role") == "assistant" else 0
+        items = [it for it in items if _gold_len(it) >= args.min_gold_words]
+    for i, it in enumerate(items[:args.n], 1):
         npz = np.load(it["npz_path"])
-        audio = torch.from_numpy(npz["audio_feat"]).unsqueeze(0).to(args.device)
-        video = torch.from_numpy(npz["video_feat"]).unsqueeze(0).to(args.device)
-        alpha = torch.from_numpy(npz["alpha"]).unsqueeze(0).to(args.device)
+        cross = getattr(mm, "use_crossattn", False)
+        alpha = torch.from_numpy(npz["alpha"].astype(np.float32)).unsqueeze(0).to(args.device)
+        if args.zero_alpha:
+            alpha = torch.zeros_like(alpha)
+        mu = torch.from_numpy(npz["mu"].astype(np.float32)).unsqueeze(0).to(args.device)
+
+        def _t(name):
+            return torch.from_numpy(npz[name].astype(np.float32)).unsqueeze(0).to(args.device)
+        base = (dict(text_emb=_t("text_emb"), audio_seq=_t("audio_seq"), video_seq=_t("video_seq"))
+                if cross else dict(audio_feat=_t("audio_feat"), video_feat=_t("video_feat")))
 
         msgs = it["messages"]
-        # 如果最后一条是 assistant（训练标签），demo 时去掉，让模型生成
+        gold = msgs[-1]["content"] if (msgs and msgs[-1].get("role") == "assistant") else ""
+        client = next((m["content"] for m in reversed(msgs) if m.get("role") == "user"), "")  # current client turn
         if len(msgs) > 0 and msgs[-1].get("role") == "assistant":
             msgs = msgs[:-1]
 
@@ -92,19 +128,42 @@ def main():
         input_ids = enc["input_ids"].to(args.device)
         attn = enc["attention_mask"].to(args.device)
 
-        full_ids, inputs_embeds, attn2, K = build_inputs_embeds(mm, input_ids, attn, audio, video, alpha)
+        # variants: sweep a state dim (needs state_proj) / real-vs-zeroed AV / plain
+        dim_idx = {"chg": 0, "aro": 1, "val": 2}
+        if args.sweep_dim and getattr(mm, "state_proj", None) is not None:
+            di = dim_idx[args.sweep_dim]
+            variants = []
+            for v in [float(x) for x in args.sweep_vals.split(",")]:
+                m2 = mu.clone(); m2[0, di] = v
+                variants.append((f"{args.sweep_dim}={v:.2f}", dict(base), m2))
+        elif args.diag_av:
+            bz = dict(base)
+            for k in ("audio_feat", "video_feat", "audio_seq", "video_seq"):
+                if k in bz:
+                    bz[k] = torch.zeros_like(bz[k])
+            variants = [("av=real", dict(base), mu), ("av=zero", bz, mu)]
+        else:
+            variants = [("real-mu", dict(base), mu)]
 
-        out = gen_lm.generate(
-            input_ids=full_ids,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attn2,
-            max_new_tokens=args.max_new_tokens,
-            do_sample=False,
-            pad_token_id=tok.eos_token_id,
-        )
-        gen = out[0, full_ids.size(1):]  # 只取新生成部分
-        print("\n=== TURN", it.get("meta", {}).get("turn_id"), "===")
-        print(tok.decode(gen, skip_special_tokens=True))
+        print(f"\n=== sample {i} ===")
+        print("CLIENT   :", client)
+        print("GOLD     :", gold)
+        for label, mm_in, state in variants:
+            st = state if getattr(mm, "state_proj", None) is not None else None
+            full_ids, inputs_embeds, attn2, K = build_inputs_embeds(mm, input_ids, attn, alpha, st, **mm_in)
+            torch.manual_seed(args.seed + i)  # SAME seed across variants -> any difference is from the varied input
+            out = gen_lm.generate(
+                input_ids=full_ids,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attn2,
+                max_new_tokens=args.max_new_tokens,
+                do_sample=not args.greedy,
+                temperature=args.temperature,
+                top_p=0.9,
+                pad_token_id=tok.eos_token_id,
+            )
+            gen = out[0, full_ids.size(1):]
+            print(f"  [{label}] {tok.decode(gen, skip_special_tokens=True).strip()}")
 
 if __name__ == "__main__":
     main()

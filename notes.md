@@ -5,17 +5,9 @@
 
 ---
 
-## 0. 当前工作范围（⚠️ 先看这条）
+## 0. 北极星
 
-**只做框架和方法。数据另说。**
-
-- ✅ **在范围内**：架构评估（第 6.5 节）指出的问题、评估方法怎么设计、代码工程健康度（路径、可复现性、README）。
-- ❌ **不在范围内**：现有 19 段 / 371 turn 数据的任何修补（补 therapist_reply、清 npz 残留、重训）。这批是弃用数据，**别再被它带走注意力**。
-- ⏸ **挂起中的上游决定**：真实数据到底用哪个（AnnoMI 主数据？DAIC-WOZ / CMDC 做带标签外部验证？）。用户会在另外的时间点定，**不要催、不要替他定**。
-
-第 5 节的数据统计、第 6 节里标了「数据相关」的条目，都只作为**历史记录**保留，不是待办。
-
-**目标**：不是论文，不是 SOTA。是**有始有终把故事说完整** —— 让项目从"一条能跑通的 pipeline"变成"一个有结论的实验"。
+**目标**：不是论文、不是 SOTA，是**有始有终把故事说完整**——方法 + 能跑的系统 + 有对照的结果 + 诚实的局限。数据已锁定 **AnnoMI**，A 段评估器已完成验证，当前在 **B 段生成器**（照 §0.2 / §0.3 走）。
 
 ---
 
@@ -34,7 +26,218 @@
 
 ## 0.2 B 段起步 handoff（compact / 新会话后直接照这个走）
 
-**当前进度**：A 段(评估器)完成并验证；**下一步 = B 段(多模态 LoRA 生成器)**，还没开始。
+**★★ 备份与换卡恢复（2026-07-24 —— 明天 2025-07-25 换 48G 卡训 14B,换卡前先读这段）**
+- **全量产物备份包**:`yuanchat_backup.tar.gz`(712M)= outputs 关键产物(evaluator + qwen7b_v3_2048/final/final_v2 + qwen14b_final + dpo 全套) + data 所有 jsonl + mm_sft_final + feats + scripts + src + notes + concreteness.txt。
+  - 服务器: `/root/autodl-tmp/yuanchat_backup.tar.gz`(数据盘,换实例能带走)
+  - **本地: `C:\Users\qmn20\yuanchat_backup.tar.gz`**(彻底保险,到期/欠费都不丢)
+- **代码**:GitHub `github.com/Magunm-7/Yuan-chat`(private,分支 `sync-latest-code`)+ 本地 `C:\Users\qmn20\Yuan-chat`(源,一直最新)。`.gitignore` 挡了 data/outputs/models/*.pt/*.npz,git 里只有代码。
+- **换卡恢复**:
+  - **同实例换卡**(控制台关机→选 48G 型号→开机):全照旧,直接用,啥都不动。
+  - **换实例**:数据盘(`/root/autodl-tmp`: qwen3 env 6.4G / 模型 43G / 词典 / 备份包)AutoDL 迁移能带走;**系统盘 `/root/Yuan-chat`(代码/产物/数据)会丢 → 从备份包解压恢复**。
+  - **env 若丢的重建**:clone base → `pip install transformers==4.51.3 spacy` + `python -m spacy download en_core_web_sm` + faithfulness 依赖;pip 损坏见 §Qwen3 分支"坑1"(bundled wheel `--ignore-installed` 自举)。
+- **服务器路径速查**:代码 `/root/Yuan-chat`;14B env `/root/autodl-tmp/envs/qwen3/bin/python`;7B 用 `/root/miniconda3/bin/python`;模型 `/root/autodl-tmp/models/`;词典 `/root/autodl-tmp/concreteness.txt`;HF 缓存 `/root/autodl-tmp/hf`;`ssh autodl-mpse`;启 demo `bash /root/start_demo.sh`。
+- **换卡后要做的**:14B 整条线重跑(SFT@2048 → DPO 纯 behaviour → 评估),用 48G 显存跑满 2048。judge 用 GPT-4 API(不占显卡,你本地跑,评 base/SFT/DPO 的 win rate)。
+
+**★ 当前进度（2026-07-23，最新 —— compact 后先读这段 + §0.4 末尾的 ★★★/★ 块）**
+A 段评估器完成验证；**B 段生成器已收尾**,最终定版 `outputs/mm_sft/qwen7b_final`。
+- **项目定位(用户拍板)**：简历项目非论文;两段式"评估器(多模态感知)+ 生成器(文本历史 + 评估器 μ/σ 注入)";讲**架构设计完整性**,不纠结 μ/σ 单独显著性、可挑最好结果讲。
+- **最终产物**：生成器 = 冻结 Qwen2.5-7B + LoRA(5.05M) + prompt 里的状态标记;评估器 = 0.89M 小网(门控加权和 + GRU);上游编码器 Whisper/CLIP/MiniLM(冻结)。数据 128 session/train 2433/holdout 491/40 轮历史/max_len 2048。
+- **正面证据(对外讲)**：评估器整体消融 **0.717 > 0.638**(多模态感知有效);生成器 vs 同输入 zero-shot **39.7 → 7.0**(SFT 有效);40 轮历史 → 连贯 MI 回复。
+- **诚实局限(如实写、别吹)**：μ/σ 注入到生成器**效果不显著**(μ 可控性实测 **0**,根因=gold 回复按内容写、跟评估器状态弱关联,SFT 学会忽略);23 low session 功效受限。
+- **待做(不吃算力)**：修 demo 显示、挑实质回复样例、重写 README;可选清掉 final 里 30M 冗余 projector。
+- **§0.3 及以下 = B 段演进史**(pooled 8.5 → cross-attn 失败 → μ 注入探索全 0 → 最终定版 7.0),按时间累积;查"为什么最终这样、试过什么失败"看它们,细节见 §0.4。
+
+**★ Qwen3-14B 升级分支（2026-07-23，进行中）**
+把生成器基模从 Qwen2.5-7B 换成 **Qwen3-14B**（用户拍板：要更大模型、坚持不量化）。7B 成果完整保留在 `qwen7b_final`，14B 是纯增量，不满意可回退。
+- **独立环境**（刻意不动原 7B 环境）：`/root/autodl-tmp/envs/qwen3/bin/python`，transformers **4.51.3**（4.44.2 不认 `qwen3` 架构）/ tokenizers 0.21.4 / torch 2.1.2 / peft 0.13.2。模型在 `/root/autodl-tmp/models/Qwen3-14B`（28G，ModelScope 下）。
+- **坑 1｜conda clone 的 pip 是坏的**：`conda create --clone base` 复制出的 pip 处于混合损坏态（残留 `pip-*.egg-info` 假记录 + 代码版本不符），装什么都报 `resolvelib` ImportError，且所有安装器看到假记录就以为"已装"而拒绝覆盖。解法：删 pip 目录后用 Python 自带 bundled wheel 自举——`python <bundled>/pip-*.whl/pip install --ignore-installed pip`。
+- **坑 2｜Qwen3 空 think 块会污染训练 target**：Qwen3 模板对"已完成的 assistant 消息"**总是**注入 `<think>\n\n</think>\n\n`（4 token），而 generation prompt 只在 `enable_thinking=False` 时才加。两侧不对称 → 空 think 块被算进 target，既稀释训练信号又让 ppl 口径与 7B 不一致。解法：`data_mm._apply_chat_template` 统一传 `enable_thinking=False`（Qwen2.5 忽略该参数，对 7B 零影响），使 think 块落到被 mask 的 prompt 侧。已验证 target = 纯 reply；`demo_mm.py` / `state_ctrl.py` 同步改（否则生成侧会自己吐 think 块）。
+- **坑 3｜显存是硬顶、不是 spill**：RTX 4080 SUPER 物理 16G、nvidia-smi 呈现 32G，但 **CUDA 硬上限 31.47 GiB 且无 host-RAM spill**——超顶直接 OOM。14B bf16 权重就占 ~29–30G，余量极小，这是所有麻烦的根源。
+- **fast-logits 优化（关键，可写进简历）**：原 forward 为全部 T 个位置计算 (T × 151936) logits 并存了三份（HF 内部 CE 一次 + shift 副本 + fp32 upcast），而**只有末尾十几个 token 被监督**（其余 label 全是 -100）。改为 batch=1 时只向 LM 要末尾 `n_target+1` 个位置（`logits_to_keep`，旧版名 `num_logits_to_keep`，都不支持则回退全量；并校验返回形状防止被 `**kwargs` 静默吞掉）。效果：PyTorch 占用 30.65G → **29.00G**，可用余量 0.40G → **2.13G**。环境变量 `MPSE_NO_FAST_LOGITS=1` 可强制走原路径做 A/B。
+  - **等价性三重验证（已过）**：①被监督 token 序列逐一相同 4/4 ②同 batch 下 loss 最大差 **2.4e-07** ③7B holdout ppl 两条路径均 **7.023**。注：7.026 vs 7.023 的微差来自 transformers 版本（4.44.2 vs 4.51.3），**与本优化无关**。
+  - 教训：第一次验证把"新旧路径"和"batch=1 vs 2"混在一个对照里，batch 大小本身会换 CUDA kernel 产生 bf16 噪声，导致假 FAIL。对照必须一次只动一个变量。
+- **max_len 实测**（用数据集里最长的 24 条做 smoke）：2048 OOM（只差 250MB）→ **1536 通过**（峰值 31869 / 32226 MiB，余量薄）→ 定档 **1536 ≈ 31 轮历史、80% 样本完整装下**。作为对比，优化前最高只能到 1024，且全量第 2 步就崩。
+- **数据换算**（Qwen3 tokenizer）：整条样本 token median **720** / p90 1898 / max 2025；每轮（client+counselor）≈ **48 token**。→ 多数样本本来就短，降 max_len 的实际伤害远小于直觉。
+- **★ 结果（2026-07-23 跑通）**：训练 43 min、峰值 31327 MiB、产物 `outputs/mm_sft/qwen14b_final`（219M = LoRA 42M + mm_prefix），max_len **1536**（≈31 轮历史）。
+
+  | 模型 | 微调后 ppl | zero-shot ppl | max_len |
+  |---|---|---|---|
+  | Qwen2.5-7B | **7.023** | 39.7(@2048) / **41.1**(@1536) | 2048 |
+  | **Qwen3-14B** | **6.715** | **429.5** | 1536 |
+
+  - **主结论**：14B **6.715 < 7B 7.023**（−4.4%），且 14B 只吃 1536 上下文、7B 吃满 2048 —— **在更短历史下仍更优**，说明是模型能力提升而非上下文换来的。
+  - **⚠ 14B zero-shot 429.5 是异常值，不可直接用来吹"提升 64×"**：同一 max_len=1536、同一评测代码下 7B zero-shot 仅 41.1，差 10×→ 排除评测设置问题，原因是 **Qwen3 的 chat template**：non-thinking 模式会在 assistant 起始塞一个空 `<think></think>` 块，未微调的 Qwen3 对该格式极不适应；Qwen2.5 无此机制。**对外讲法**：主打 14B vs 7B 的微调后对比（6.72 vs 7.02）；zero-shot→微调只在**同模型内部**用来证明 SFT 有效（7B: 41→7.0；14B: 429→6.7），并能解释 429 的模板成因。
+  - **★★ 同口径严格对比（全部：新路径 + qwen3 env + 同评测代码）**
+
+    | 配置 | ppl | 备注 |
+    |---|---|---|
+    | 7B 旧路径 @2048 | 7.023 | 修复前的历史值 |
+    | 7B 新路径 @1536 (`qwen7b_final_v2`) | **6.796** | 21 min |
+    | 7B 新路径 @2048 (`qwen7b_v3_2048`) | **6.795** | **7B 上限** |
+    | **14B 新路径 @1536** (`qwen14b_final`) | **6.715** | 43 min，全场最优 |
+
+  - **结论 1｜上下文收益在 1536 处饱和**：7B 从 1536→2048（31→42 轮历史）ppl 只从 6.796 变 6.795（Δ=0.001）。→ **14B 受显存限制只能吃 1536 并不构成劣势**，因为超过 1536 本就没有增益。这是本项目一个有独立价值的实验发现（可讲"测出了该任务的上下文收益边界"）。
+  - **结论 2｜14B 的领先真实但边际**：14B 6.715 vs 7B 上限 6.795 = **−1.2%**（此前 −4.4% 是虚高，因为拿 14B 最优比 7B 旧路径）。代价：训练 43 vs 21 min、显存吃满 31.3G、推理更贵。**性价比看 7B 更优；要"14B"这个规模数字则有 1.2% 的真实提升可支撑**。两套产物均保留。
+  - **结论 3｜修 NaN 顺带改进了原有成果**：去掉全零 prefix 让 7B 从 7.023 → 6.795（**−3.2%**），等于白捡的收益。
+
+**★ 实时 demo + 生成质量诊断（2026-07-23/24）**
+
+**一、可部署 demo（端到端跑通）**
+- `scripts/demo_server.py`（FastAPI）+ `scripts/demo_ui.html`（浏览器采集音视频）。链路：
+  Whisper(ASR 文本 + audio_emb 768) / CLIP(video_emb 768) / MiniLM(text_emb 384) → **MPSE 评估器 → μ/σ** → `state_tag` → prompt → Qwen+LoRA。
+- 启动：服务器 `bash /root/start_demo.sh`；本机 `ssh -L 8000:localhost:8000 autodl-mpse` 后开 http://localhost:8000（走 localhost 才能用 getUserMedia，无需 HTTPS）。
+- 前端支持 **VAD 自动对话**（1 秒环境噪声自适应标定 → 开口自动录、停顿 1.2s 自动发送），保留按住说话与打字。
+- **首个可部署评估器**：`scripts/train_evaluator_deploy.py` → `outputs/evaluator/mpse_deploy.pt`（此前 `train_mpse.py` 是 CV 训完即弃，只有离线预测，没有能实时推理的权重）。
+- 踩坑：whisper 缓存缺 tokenizer + `generation_config.json` 是旧版（项目一直只用其 encoder 提特征，从没跑过解码器）；Pydantic 模型必须定义在**模块级**，否则 `from __future__ import annotations` 让 FastAPI 反查不到类型、把 body 当 query 参数。
+
+**二、生成质量诊断（关键发现）**
+- **温度是最敏感的旋钮**（行为分类器实测）：`0.7` → 滑向 therapist_input 长篇说教；`0.4` → mode collapse 只剩 "Yeah./Okay."（词数 4.5、other 占 77.5%）。**两种"训练效果不好"的表象其实是同一个参数的两端。**
+- **行为分布对比**（40 条 holdout）：
+
+  | | reflection | question | therapist_input | other | 平均词数 |
+  |---|---|---|---|---|---|
+  | gold 真人 | 17.5% | 27.5% | 7.5% | 47.5% | 11.6 |
+  | 微调模型 @0.4 | 12.5% | 10.0% | 0.0% | 77.5% | 4.5 |
+  | base 未微调 | 65.0% | 17.5% | 17.5% | 0.0% | 29.4 |
+
+  → base 的**共情能力反而更强**(reflection 65%)，只是太长、不会用简短应答；微调模型偏向另一极端。
+- **话题漂移（30 段 × 8 轮，用户全程只说无信息量寒暄）**：原 prompt 整段污染 **33%**、平均首漂第 **2.6** 轮、**首漂后粘性 57%**；加话题约束 prompt 后污染 17%、首漂推迟到 4.6 轮，但**粘性 52% 没改善**——约束能延缓发病、治不了病。
+  - ⚠ 教训：先用 6 段样本得出"首漂恒为第 1 轮、粘性 0~29%、雪球假设证伪"，被 30 段推翻。小样本（2 个漂移案例）的结论完全是噪声。
+  - ⚠ 更严重且**指标漏掉**的问题：模型会**捏造来访者说过的话**（"you said you'd been together 10 years"、"I have a referral from another counselor"），而用户什么都没说。这类幻觉不含话题词，统计里被算作"干净"。
+
+**三、复合 reward（RLHF 思路，不训 RM）** — `scripts/behaviour_scorer.py` + `scripts/reward_model.py`
+- **信号来源是数据集自带的 turn 级 MI 行为标注**（`reply_behaviour`），高质量会话 reflection 29.1% vs 低质量 6.3%、therapist_input 8.0% vs 35.4%，**差 4.4~4.6 倍**，信号极强且零标注成本。
+- 行为分类器：MiniLM 嵌入 + LogReg，**按会话分组** 5 折 CV `accuracy 0.757 / macro-F1 0.709`（`outputs/evaluator/behaviour_clf.npz`）。
+- reward = `behaviour × gate(relevance) + 0.4·relevance − 1.2·fabrication`。
+  - **relevance 必须做成门控而非加项**：初版用加法时，一句 rel=0.01 的"我看你有吸烟方面的顾虑"靠 behaviour 单项 +1.0 硬撑到第三名；改成 sigmoid 门控后 gate=0.09 直接压穿。
+  - fabrication 需覆盖两类：回指句式（you said…）**和**直接陈述无根据事实（转介/医生/预约/具体天数）——实测捏造多半不走回指句式。
+- 验证结果：正常场景排序合理，说教/辩论全被打负分（阻抗场景 −0.24 ~ −0.29）；冷启动修复后 `"Hi. How are you?"` 正确升到第一。
+- **已知盲区**：抓不到语义理解错误（"戒烟四天"被答成"抽了四天"、戒烟说成戒酒），需要 NLI 才能治。
+- **best-of-8 已实现待验证**：`num_return_sequences=8` 一次前向出 8 条（共享 prompt 计算，延迟远低于串行），高温 0.9 采样保证多样 + reward 挑质量。**这正是"温度困境"的解耦方案**——生成阶段放开多样性，筛选阶段保证质量。返回值带 `candidates` 供界面展示筛选过程。
+- 定位：best-of-n 是 DPO 的**前置验证**——若它都改善不明显，说明 reward 判别力不足，DPO 只会把模型优化到错误目标上。
+
+**四、GPU 故障（2026-07-24，已自行恢复）**：`nvidia-smi → Failed to initialize NVML`，设备节点尚在（AutoDL 容器掉卡）。未做任何操作，稍后自行恢复。若再遇到：控制台关机→开机（数据盘/环境/产物全保留），仍不行则换实例。
+
+**五、best-of-8 验证通过（2026-07-24）**
+- 实测:**1.5 秒出 8 条候选**(`num_return_sequences` 共享 prompt 前向,不是 8 倍代价),分数区间 +1.325 ~ +0.766,排序符合直觉;垫底那条正是捏造("I remember you were out drinking last week")。
+- **意义:解耦了"温度困境"** —— 生成阶段用高温(0.9)保多样,筛选阶段用 reward 保质量,不必再在"高温说教"与"低温只会 Yeah"之间二选一。
+- 冗余容错:那条捏造并未被 fabrication 正则命中(fab=0.00),但靠低 relevance + question 行为分照样沉底 —— **多信号组合比单一打分器稳健**。
+
+**六、DPO(进行中,2026-07-24 00:40 启动)**
+- **路径**:reward → BoN 验证 → 用 BoN 造偏好对 → DPO → 横向对比。BoN 是 DPO 的**前置验证兼数据来源**(即 Llama-2 的 rejection sampling fine-tuning);若 BoN 都改善不明显,DPO 只会把模型优化到错误目标上。
+- **偏好对构造**(`scripts/build_dpo_pairs.py` → `/generate` 接口):每条 prompt 采 8 候选 → reward 打分 → 最高=chosen、最低=rejected。**用户拍板:gold 不进候选池**(纯 on-policy),否则 chosen 几乎必然是 gold、DPO 退化成变相 SFT、加剧模板化。
+- **过滤**:分差 < 0.3(无学习信号)、去重后候选 < 2、最高分为负、来访者话语 < 3 词(AnnoMI 转写切分产生的空/残缺输入)。
+- **300 条试跑结果**:保留 207 (69%),分差 mean 0.854;**chosen 行为分布 reflection 73% / 说教 0%,rejected 说教 62% / reflection 3%** —— 把数据集本身的信号(high reflection 29.1% vs low 6.3%)放大到极致,证明 reward 抓的是 MI 技术要领而非表层特征。
+- **全量**:2433 条,实测 **3.37 s/条**(prompt 带长历史) → 约 2.3 h,预计产出 ~1650 对。
+- **训练**(`scripts/train_dpo.py`,手写损失不依赖 TRL):`loss = -log sigmoid(beta * [(logp_pol(c)-logp_ref(c)) - (logp_pol(r)-logp_ref(r))])`,beta=0.1 / lr=5e-6 / 1 epoch / max_len 1024。
+  - **参考模型 = SFT 模型而非原始 base**:先把 SFT LoRA `merge_and_unload()` 进权重,再挂新的 DPO LoRA;`disable_adapter()` 得到的就是参考模型 —— **同一份权重两用,显存不翻倍**,这是 LoRA+DPO 的天然便利。
+  - 参考模型的作用:没有它,模型会把概率质量全堆到少数安全话上而退化(正是 temperature 0.4 时"只会 Yeah"的状态);beta 即隐式 KL 约束的松紧。
+- **产物**:`outputs/dpo/qwen7b_dpo/`(LoRA ~40MB)。**依赖 base+SFT 已 merge 的权重**,不能单独加载到原始 base 上。
+- **验收标准**(`scripts/eval_dpo_compare.py`,一次加载靠 disable_adapter 覆盖四配置):
+
+  | 配置 | 期望 |
+  |---|---|
+  | SFT + 单次 | 基线 |
+  | SFT + BoN-8 | 当前 demo 质量 |
+  | **DPO + 单次** | **应 ≈ SFT+BoN-8,才说明训练把 reward 吃进了权重、可关掉 BoN(推理省 8 倍算力)** |
+  | DPO + BoN-8 | 上限 |
+
+  若 DPO 单次打不过 SFT+BoN-8,就老实继续用 BoN(它已验证有效),别硬上。
+- **风险**:数据全靠行为分类器(CV acc 0.757)判定,它有偏 DPO 就会忠实学到其偏见;典型失败是 **reward hacking**(发现塞 "sounds like" 就能判成 reflection → 产出空洞假共情)。**验收必须人工抽检 + 与 BoN 对比,不能只看损失下降。**
+- 已知盲区(reward 抓不到):语义理解错误(把"戒烟四天"答成"抽了四天"、戒烟说成戒酒),需 NLI 才能治。
+
+**★★ DPO 结果(2026-07-24 03:15 完成)** — 训练 27 min,产物 `outputs/dpo/qwen7b_dpo`(20MB adapter),1608 偏好对。
+
+| 配置 | reward | reflection | question | therapist_input | other | 词数 |
+|---|---|---|---|---|---|---|
+| SFT + 单次 | +0.249 | 15.0% | 13.3% | 13.3% | 58.3% | 11.4 |
+| SFT + BoN-8 | +0.739 | 58.3% | 25.0% | 0.0% | 16.7% | 19.4 |
+| **DPO + 单次** | **+0.711** | 50.0% | 36.7% | 13.3% | 0.0% | 23.9 |
+| DPO + BoN-8 | +1.091 | 93.3% | 6.7% | 0.0% | 0.0% | 26.9 |
+| (gold 真人参照) | — | 17.5% | 27.5% | 7.5% | 47.5% | **11.6** |
+
+- **量化结论**:DPO 单次 **+0.711 ≈ SFT+BoN-8 +0.739**(差 0.028)→ **把 8 选 1 的质量蒸馏进了权重,单次推理即可,省 8× 算力**。相对 SFT 单次提升 **+0.462**,敷衍(other)从 58% 清零。DPO+BoN 叠加达 +1.091,说明没把多样性训死。
+- **定性结论(关键,推翻纯数字判断)**:并排读 10 条实际生成 —
+  - ✅ DPO **真实修好了 SFT 单次的核心病**:SFT 单次大面积退化成 "Mm-hmm./Yeah."(1 词敷衍),DPO 几乎全变实质反映。
+  - ⚠ **但变长 = reward hacking + 捏造**:DPO 学会"做长反映拿高分",而长反映**编造用户没说的细节**(如"你从公交台阶跳下崴了脚踝""一周喝三天""从学校回家又喝几杯"——全是无中生有)。行为分类器判它 reflection 高分,但**判不了反映内容的真实性**。词数 23.9 vs gold 11.6,近两倍。
+  - 三方向对比:gold=简洁+不编;SFT单次=不编+敷衍;**DPO=实质反映+捏造**。DPO 相对 SFT 是净提升,但与 gold 是两个方向的偏离。
+- **下一轮迭代方向(需用户拍板,未启动)**:reward 加 **NLI 忠实性检查**(缓存有 `bart-large-mnli`),判"回复里的具体细节是否被用户输入蕴含",不蕴含=捏造扣分 → 重造偏好对 → 重训 DPO。可顺带加长度惩罚拉回 gold 的简洁。
+- **产物加载**:base → merge SFT LoRA(`qwen7b_v3_2048`)→ 挂 DPO adapter(`qwen7b_dpo`)。`scripts/eval_dpo_compare.py`(四配置横评)、`scripts/dpo_qualitative.py`(并排定性)。
+- **可写进简历的完整技术线**:察觉"照 gold 回"→ 行为分布诊断(温度敏感/说教/敷衍两极)→ 零标注 reward(数据集自带 MI 行为标注 + relevance门控 + fabrication)→ BoN 验证 reward → BoN 造偏好对 → DPO 蒸馏 → 四配置横评 + 定性验收发现 reward hacking。**从真实失败现象一步步逼出来,不是照论文抄。**
+
+**★★ 忠实性检测探索(2026-07-24,治 DPO 的 reward hacking/捏造)** — 目标:检测"reflection 里假装复述却编造具体事实(跳公交/三天一周)"。四条路逐一试(全部先小样本验证再投入,救了多次白跑):
+1. **NLI(bart-large-mnli):失败**。MI 反映是转述/疑问/推断,非逻辑蕴含 → 忠实(0.00x)和捏造(0.00x)全趴、分不开,答非所问反而 entail 最高(0.176)。根因:entailment 与"检测捏造"任务不对齐。
+2. **子句级语义相似度(MiniLM):部分**。整句 rel 能抓完全跑题(0.144)/纯捏造(0.098),但半真半假(整句 0.653 漏)和合理推断(子句 0.223 误伤)分不开。
+3. **长度惩罚:只治标**。80条×8候选扫 W_len:W_len=0.02 一步把词数 17→12 拉回 gold(11.6)、副作用最小;但**捏造率只 54%→46%**(压回正常长度后仍 48% 捏造)→ 证伪"捏造依赖冗长"。敷衍率随 W_len 单调升(护栏:别调大)。**W_len=0.02 留作辅助项,治不了捏造。**
+4. **实体级 grounding:成功(定版)**。捏造=引入上下文没有的**具体实体**。spaCy 抽名词/数字 → 只对 concreteness≥4.0 的具体实体(Brysbaert 4万词词典;bus 4.9 vs stress 2.8)查与上下文的 MiniLM 语义 grounding;数字走单独通道。
+   - 打磨三轮:①功能词碎片(bit/lot)黑名单 ②数字通道 ③concreteness 过滤(豁免抽象推断 stress/confidence、合法引入 importance/reason)。
+   - **只对 reflection 生效**:question/therapist_input 本就合法引入信息(产品/医生/工具/人名),对其查忠实性是误伤(实测 therapist_input flag 54% 全是合法引入)。
+   - 结果:6 条回归全对(bus/ankle/school/three 全抓、忠实全 0);100 条 gold 误伤 reflection 33%→**14%**、总 31%→**13%**,残留 flag 全是习语(back burner)/合理复述(baby),非真捏造。
+   - 组件:`scripts/faithfulness.py`(`score_faithfulness(reply,ctx)→(penalty,未grounded实体)`);词典 `/root/autodl-tmp/concreteness.txt`;依赖 spacy+en_core_web_sm(qwen3 env 已装)。
+- **★ reward 定版公式**:`R = behaviour×gate(rel) + 0.4·rel − W_fab·faith(仅reflection) − 0.02·max(0,words−15)`。
+- **整合重训已做,DPO-v2 失败(过度矫正,2026-07-24)**。新 reward(faith 仅reflection + 长度惩罚 W_LEN=0.02)整合进 `score_candidates`,重造 1772 偏好对 → 训 `qwen7b_dpo_v2`。横向对比(60 条 holdout 单次):
+
+  | | reflection | 敷衍 | 词数 | 捏造率* |
+  |---|---|---|---|---|
+  | SFT 单次 | 21.7% | 60.0% | 8.5 | 1.7% |
+  | DPO-v1 单次 | 61.7% | 0.0% | 22.3 | 1.7% |
+  | **DPO-v2 单次** | 30.0% | 46.7% | **2.9** | 0.0% |
+
+  *捏造率用 faithfulness 测,对"判断类捏造"(你有酗酒问题)召回低,**1.7% 低估真实捏造**,只作相对参考。
+  - **v2 坍缩成敷衍**(2.9 词、敷衍 46.7%、reflection 塌回 30%)。偏好对本身没问题(chosen 中位 11 词=gold、rejected 37 词),但 **DPO 学"chosen 相对 rejected 的方向"而非绝对值**,把"短>长"外推到极致(→最短 Yeah,同时躲长度罚+faith罚)。
+  - **v1/v2 是对称的 reward hacking**:v1 偏好对 chosen 偏长→外推"越长越像reflection"→变长捏造;v2 chosen 偏短→外推"越短越好"→敷衍坍缩。**根因:长度成了偏好对系统性区分维度,DPO 把它当信号外推。**
+  - **★ 核心洞察(可写简历):长度惩罚属于推理时 best-of-n(选择场景,只影响选谁,不外推,sweep 验证有效),不属于 DPO 训练(优化分布,任何系统性信号被推到极致→坍缩)。选择场景的 reward ≠ 优化场景的 reward。**
+  - **产物定位**:**DPO-v1(`qwen7b_dpo`)是可用产物**(行为质量达标:reflection 61.7%/敷衍 0%),变长/捏造用**推理时 best-of-n(完整 reward:faith+长度惩罚)精修**,不塞进训练。DPO-v2(`qwen7b_dpo_v2`)是失败对照,保留。
+  - **可选 v3**(需拍板,未做):偏好对只在"长度相近"候选间比较(controlled comparison,消除长度作为区分维度),让 DPO 纯学 MI 质量。再一轮 ~3.5h。
+- 之前的 NLI 计划已作废(见上 1)。
+
+**★ DPO 指标消融(2026-07-24)** — 方法论:reward 里只有 behaviour 被证有效,relevance/faith/length 逐个单独消融(控制变量)。**关键前提:必须小规模训 DPO 才能验(sweep 选择场景≠DPO 优化场景,v2 已证);采样一次存候选池 `data/annomi/cand_pool.jsonl`(274 条×8,分项 reply/behaviour/rel/faith/words),之后任意消融离线复用不再采样**。脚本:`sample_candidates.py`/`make_pairs_offline.py`(reward 项可配)/`eval_ablation.py`。
+- **relevance 消融**(A=behaviour only 231对 / B=behaviour+rel 192对,各训小 DPO,60 条 holdout 评估):
+
+  | | 答非所问 | 复读率 | reflection | 敷衍 | 词数 |
+  |---|---|---|---|---|---|
+  | SFT | 55.0% | 2.4% | 15.0% | 61.7% | 10.9 |
+  | A(behaviour) | **45.0%** | 0.5% | 20.0% | 56.7% | 8.6 |
+  | B(+relevance) | 51.7% | **5.6%** | 21.7% | 53.3% | 9.9 |
+
+  - **结论:relevance 不该单独进 DPO —— 冗余 + 有害。**
+    - 冗余:答非所问的主因是**敷衍**(Mm-hmm 天然低 rel;SFT 答非所问 55%≈敷衍 61.7%),而 behaviour 已在压敷衍 → A(纯behaviour)答非所问 45% 最低。relevance 想解决的问题被 behaviour 顺带解决了。
+    - 有害:B 相对 A,答非所问不降反升(45→51.7),**复读率涨 11 倍(0.5→5.6%)** —— relevance 被 DPO 外推成鹦鹉学舌。
+  - **★ 收敛出的规律:连续单调的辅助信号(relevance/length)进 DPO 优化目标都会被外推到病态(复读/坍缩);只有 behaviour(离散、明确类别目标)是 DPO 能稳定学好的。**
+  - caveat:数据量小(A 231/B 192),behaviour 效果都偏弱(reflection 才 20% vs v1 61.7%),答非所问的 6.7 点升可能含噪声;但复读 11 倍与理论(连续信号外推)一致,方向可信。
+- **偏好对长度的意外发现**:纯 behaviour(A)的 chosen 13.9 词 < rejected 28.0 词 —— **即使无长度惩罚,chosen 也天然短**(要拒的说教 therapist_input 中位 34 词)。所以 v1/v2 的"chosen 短"部分来自 behaviour 逻辑(说教长该拒),不全是长度惩罚。加 rel 后长度差被中和(B: 21.2 vs 23.6)。
+- **待做**:faith 消融(复用候选池)——但需先解决"独立捏造 metric"(faithfulness 自证循环+召回低,LLM-as-judge 是候选)。当前倾向:**DPO reward 收敛到只留 behaviour**(待用户拍板)。
+
+**✅ 已解决：14B 训练 loss=NaN —— 根因是「全零 prefix + Qwen3 的 QK-Norm」（2026-07-23）**
+- **根因**：`text_only` 消融的实现是 `alpha=0` 把 prefix 乘成**全零向量**（架构不变、只切断信号，本是干净的消融设计）。但全零向量进 RMSNorm 时 `variance=0`，其**反向**要算 `variance^(-1.5)` 类项 → 数值奇点。**Qwen3 比 Qwen2 多一层 QK-Norm**（对 q/k 各加一次 RMSNorm），同一个全零 token 要多过两次 norm，于是 Qwen2.5-7B 扛住了、Qwen3-14B 崩了。
+- **决定性对照**（裸 LM + LoRA，同为 16 个 prefix token）：
+
+  | 输入 | 坏梯度 | 结论 |
+  |---|---|---|
+  | 无 prefix | 0/320 | 干净 |
+  | **全零 prefix ×16** | **232/320** | **NaN（复现）** |
+  | 随机小值 prefix ×16 | 0/320 | 干净 → 问题是**零值**，不是 token 数量 |
+
+- **修复**：`model_wrap.forward` + `eval_mm_ppl` 同步——**prefix 全零时直接跳过拼接**（语义完全等价，还省掉 K 个位置的注意力计算）。两处必须一起改，否则训练/评估输入长度不同、ppl 不可比。
+- **验证**：14B 坏梯度 **232/320 → 0/320**；7B 对照仍 0/224；全量训练 loss 恢复正常波动（0.07~2.6）。
+- **性质**：这是一个**在 7B 上潜伏了整个项目、从未暴露的实现缺陷**，换架构才致命。伪装性强——前向 loss 完全正常（6.87），只有反向梯度坏，不查梯度根本发现不了。
+- **遗留**：7B 现有 7.023 是在「拼全零 prefix」的旧路径下训练+评估的，14B 走新路径。若要 7B/14B 严格同口径对比，需用新代码重训一次 7B（约 30 min）。7B 原产物与数字均完整保留。
+
+**排查过程（逐层证伪，2026-07-23）**
+`max_len=1536` 全量训练从**第 1 步**起 loss 就是 nan（跑到 19% 才发现并 kill）。逐层排查（每步只动一个变量）：
+| 假设 | 结论 |
+|---|---|
+| Qwen3-14B 模型本身坏 | **否** — 纯前向 logits 正常（absmax 24.6） |
+| 环境/版本（tf 4.51.3 + torch 2.1.2） | **前向否** — inputs_embeds / autocast / 1536 长序列前向全正常 |
+| 我的 fast-logits 优化 | **否** — 开/关两条路径 loss 完全相同（6.865565），且 `logits_to_keep` 返回形状精确 (1,26,151936) |
+| gradient checkpointing | **否** — 关掉照样 NaN |
+| sdpa 注意力反向 kernel | **否** — 换 `attn_implementation=eager` 照样 NaN |
+| bf16 精度不足（LoRA 用 bf16 累积梯度） | **否** — LoRA 转 fp32 无效；去掉 autocast 也无效 |
+| Qwen3 滑窗分层差异 | **否** — config: `max_window_layers=40`(=总层数)、`sliding_window=null`、`use_sliding_window=false` |
+- **已定位到的事实**：**前向正常（loss 6.87）、反向梯度 NaN**。坏梯度 **232/320 个 LoRA 张量 + 8/8 projector**，三种配置下数字**分毫不差**→ 是结构性/确定性问题，不是数值随机波动。232 = 29 层 × 8，干净的 88 = 11 层 × 8 → 反传到第 29 层附近 NaN 凭空产生，污染其后（更靠前）所有层。
+- **验伪对照（关键）**：同一套代码路径下 **7B 梯度完全干净（0/224, 0/8）**→ 证明测试本身可信、代码路径无问题，是 **Qwen3 架构特有**（Qwen2→Qwen3 主要新增 **QK-Norm**：对 q/k 各加一层 RMSNorm）。
+- **当前主假设**：Qwen3 的 QK-Norm 反向 在 **torch 2.1.2**（2023 年版）上有问题——transformers 4.51.3 是 2025 年版、针对新 torch 开发。**修法候选：升级 qwen3 env 的 torch**（在独立 env 里升，不影响 7B 的 base env）。
+- **注意：这与显存/换卡无关**——换 48G 卡不会修好 NaN。48G 的收益是另一回事（跑满 2048 完整历史 + 关 grad_ckpt + 上 batch），两件事要分开决策。
 
 **连服务器**：`ssh autodl-mpse`（SSH 别名已配、密钥免密）。代码在 `/root/Yuan-chat`；数据/产物在 repo 的 `data/annomi/`（gitignore，只在服务器和本机，不在 GitHub）。
 **每次跑前**：`source /root/miniconda3/etc/profile.d/conda.sh && conda activate base`
@@ -50,7 +253,7 @@
 - wav / 视频原件：`data/annomi/{wav,video}/`（128 段）
 
 **B 段计划**：改继承来的 `src/mpse_mvp/mm/train_mm_sft.py` 喂 AnnoMI——冻结 7–8B base + LoRA(q/k/v/o) + `SoftTokenProjector` 把 audio/video 池化成前缀软 token、α 门控、σ 做样本权重、目标是 `therapist_reply`。产物 `mm_prefix.pt` + `lora_adapter` = **多模态权重**（用户心心念念的最终产物）。
-**基模**：迭代用 **7–8B**（这台 vGPU 物理 16G 装得下，一 epoch ~15–40 min；**14B bf16 会溢出到主机内存、奇慢**，展示版另租真 ≥32G 卡）。具体 7–8B 型号待联网挑（**用户不要量化 QLoRA**）。
+**基模**：7B 定版 = Qwen2.5-7B-Instruct（一 epoch ~15–40 min）。**14B 见下面的 Qwen3-14B 分支块**——此前"14B bf16 会溢出到主机内存、奇慢"的判断**已被实测推翻**：这块卡没有 host-RAM spill，超顶是直接 CUDA OOM 而非变慢，且 14B 速度正常。**用户不要量化 QLoRA**。
 **B 段评估**：held-out perplexity（只算 assistant token）+ 定性样例，对比**纯文本 LoRA baseline**（关掉前缀）。
 
 **评估 recipe（高 μ=change 约定，已统一）**：
@@ -58,6 +261,155 @@
 - `python scripts/test_multimodal_value.py --pred data/annomi/pred_mm2.jsonl`
 
 **A 段结论（已定，别重跑去"验证"）**：H1 chg AUC 0.615 / p=0.001 / bal-acc 0.584（P0.74 R0.56 F1 0.64）；Option C 多模态 0.631 vs 纯文本 0.524（+0.107，抓 low 质量精度 0.18→0.33）。功效受 23 个 low session 硬上限限制。
+
+---
+
+## 0.3 B 段进度（doing，2026-07-22 起）
+
+**基模**：`Qwen2.5-7B-Instruct`（当前 transformers 4.44.2 直接能跑；Qwen3-8B 要升到 ≥4.51、Llama-3.1 要过 gated 授权，都更折腾）。下载走 **ModelScope**（`modelscope download`，域内快）——hf-mirror 当时超时不稳。存 `/root/autodl-tmp/models/Qwen2.5-7B-Instruct`。展示版再上 Qwen3-8B/更大。
+
+**数据构造器 `scripts/build_mm_sft.py`（已跑）**：按 `(session_id,turn_id)` join `turns_labeled`(目标 therapist_reply + client_face) × `feats/*.npz`(audio_emb/video_emb) × `pred_mm2`(μ/σ)。产出：
+- `data/annomi/mm_sft/npz/<sid>_<tid>.npz`：`audio_feat(768)/video_feat(768)/alpha(2)/mu(3)`（正好是 trainer 现成契约，train_mm_sft/data_mm/model_wrap 不用改）
+- `data/annomi/mm_sft/{train,holdout}.jsonl`：`{npz_path, messages, sample_weight}`
+- **2924 行**（跳过 9 条空回复），**train 2433 / holdout 491**（holdout=splits.holdout.test 的 27 个 session，会话级不泄漏）
+- `messages` 只放 client 原话→therapist 回复，**μ 数字不进 prompt**（早验证塞字符串是噪声）；状态只从音视频软前缀进。
+- **α 门控**：`alpha=[q_audio, q_video·(client_face?1:0.3)]`——视频没做说话人归属，靠 ASD 的 client_face 置信；缺失就把视频降权。
+- **σ 权重**：`w=exp(-λσ̄)`（λ=8，归一化到均值 1）。**诚实局限**：σ 大多贴地板 0.0498，只有一小撮高不确定 turn 被降权（w 最低到 0.216≈5×），整体接近均匀——机制在、这份数据咬合弱。
+
+**代码（已写、已同步服务器）**：
+- `scripts/run_mm_sft.py`：瘦启动器，直接调 `train_mm_sft`（单一 consolidated index，非 run_full_loop 的逐 session）。
+- `train_mm_sft` 加了 `text_only` 参数：把 alpha 清零 → 前缀在但无模态信号（做**同架构同步数的纯文本对照**）。
+- `scripts/eval_mm_ppl.py`：holdout 上只算 assistant-token 的 perplexity。三档同一 holdout 对比：**base**(裸 Qwen 地板) / **text-only**(LoRA+零 alpha) / **multimodal**(LoRA+活前缀)。text-only vs multimodal 只差"模态信号通不通",ppl gap = 多模态净效应。
+
+**★ B 段首个结果（2026-07-22，holdout 491 条 / 9628 assistant token 的 perplexity）**：
+| config | ppl |
+|---|---|
+| base（裸 Qwen2.5-7B，无 adapter） | 566.4 |
+| text-only LoRA（alpha=0） | 8.544 |
+| **multimodal LoRA（活前缀）** | **8.453** |
+- **SFT 是大头**：566→8.5，adapter 学到了 MI 回复风格/分布（裸模型对简短临床回复完全懵）。证成"生成器需要微调"。
+- **多模态是小头**：8.544→8.453，**仅 −1.1%（Δppl −0.09）**。方向对但小 → 与 A 段一致：文本主导语义、音视频边际增益。多模态有分量的证据在 A 段 Option C（+0.107），不在这里。
+- 产物：`outputs/mm_sft/qwen7b_mm/`（多模态）、`outputs/mm_sft/qwen7b_text/`（纯文本对照），各 `mm_prefix.pt` + `lora_adapter/`。
+- 训练：1 epoch，bs=1，max_len=512，~8 min/epoch，峰值显存 15.4G（不溢出）。eval 有过 dtype bug（fp32 projector × bf16 emb），已用 autocast 修。
+- **配对 bootstrap（逐 turn，5000 次）**：Δppl −0.091，**95% CI [−0.207, +0.032] 跨 0 → 未达 95% 显著**；单边 P(多模态更好)=0.934（≈p 0.07）；逐 turn 多模态胜率 52.5%，平均 −0.014 nats/token。→ **方向对、幅度小、够不到 95%**。跟 A 段完全一致：文本主导语义，多模态的分量证据在 Option C 不在生成 ppl。诚实结论，不吹不废。
+
+**★ 定性（demo_mm.py，holdout，多模态 adapter）**：
+- **greedy 会塌成 backchannel**（每条都 "Mm-hmm."）——ppl 是 teacher-forced 好看，自由 greedy 在 1-epoch 轻 SFT 上塌到最安全 token。改**采样**(temp 0.7/top_p 0.9)才看得出学到的风格。
+- 采样 + 只挑 gold 是实质回复的 turn：模型能出**像样的 MI 回复**——如 client 说一晚喝 7–8 杯 → 生成 "So how many days of the week do you think you drink?"（合格的 MI 开放式提问，不输 gold）；也有 values 探索式提问。但**约一半仍是 backchannel**（"Yeah/Right/Mm-hmm"），偶有轻微 hallucination（凭空提 "kids"）。
+- 诚实结论：生成器**确实学到了 MI 回复风格（含 backchannel + 实质反映/提问），忠实于 AnnoMI 本身 backchannel 密集的分布**；采样能surface 实质回复。1 epoch、demo 定位，不跟 SOTA 比。
+
+**B 段核心实验到此完整**：多模态权重产出 + 三档 ppl 对照 + 配对 bootstrap + 定性。剩：③ 重写 README（把"多模态生成仅边际不显著""greedy 塌缩需采样"如实写）。可选强化：见 §0.4 cross-attention。
+
+---
+
+## 0.4 评估器消融 + cross-attention 融合升级（路线2，doing 2026-07-23）
+
+**★ 评估器四开关消融（`ablate_mpse.py`，3 seed × 60 epoch，session-CV）**
+| 配置 | chg AUC(H1) | OptC AUC(质量) | ΔOptC |
+|---|---|---|---|
+| full | 0.597±0.011 | 0.717±0.066 | — |
+| −audio | 0.600±0.005 | 0.680±0.087 | −0.037 |
+| −video | 0.597±0.006 | 0.653±0.021 | **−0.064** |
+| −alpha | 0.590±0.002 | 0.689±0.034 | −0.028 |
+| −sigma | 0.587±0.008 | 0.722±0.066 | **+0.005** |
+- **多模态立住**：去音/去视质量区分都掉(视频 −0.064 > 音频 −0.037，val 面部更重要)，−video 的 std 最小(±0.021)最扎实。这是"多模态有效"的硬证据。
+- **α 弱**：−alpha 掉 0.028，方向对(学门控>等权)但落在噪声内，非强证据。
+- **σ 无证据(诚实)**：−sigma 反而 +0.005 → **σ 是三大 idea 里这份数据上最弱的一环**。σ 的场子在 H3 校准/稳定性，不在 OptC；但它也贴地板咬合弱。README 如实写"σ 反哺未在质量区分上显增益"，不硬吹。
+- **元层面**：Δ 多在 std 量级=方向性证据非强显著(23 low 功效上限)；full 这次 0.717 vs 早前 0.631 是 seed 随机性，Option C 绝对值本就不稳，看相对 Δ。
+- chg 五档全 0.587–0.600 几乎不动 → 印证 chg 文本主导、消融不敏感。
+
+**★ 评估器整体消融（`ablate_evaluator.py`，3 seed，回答"评估器本身加没加信息"）**
+| 档 | OptC AUC | 说明 |
+|---|---|---|
+| no-eval | 0.638 | 三路弱标签轨迹,不过评估器 |
+| eval-text | 0.533±0.060 | 评估器在但只喂文本(去音视频) |
+| **full** | **0.717±0.066** | 完整评估器(三模态) |
+- **full > no-eval(+0.079)**：评估器**确实加信息**（把弱标签融合成更有判别力的状态轨迹）→ "评估器有效果"的直接证据，整体消融证明、不靠内部 σ/α。
+- **eval-text 0.533 < no-eval**：残缺评估器(纯文本)反而更差——aro/val 从文本瞎猜=噪声拖累。→ **评估器增益全来自多模态融合;多模态是刚需,纯文本版本崩**。
+- 边界：+0.079 在 std 量级,方向清楚非强显著(23 low 功效上限)。
+- **对产品定位的意义**：评估器=感知层已证有料(0.717)；B 段生成没用上它(前缀走原始 emb)→ **下一枪 = 把评估器的状态接进生成**,让"感知→共情生成"名副其实(现在耦合松才是 B 段多模态 ppl 不显著的真因)。
+
+**★ cross-attention 融合升级（设计已定案，待做）**
+动机：消融显示模态有料(去音/视都掉)，值得比"简单投影+加权和"更充分地用音视频。用户要求融合不能 toy、要有故事、且**不稀释原创**(不 cite 命名方法，用通用算子自己组)。
+- **定案设计**：**text-queried cross-attention**——文本表征当 query，音频序列+视频序列当 K/V，让文本在每帧上决定信音视频哪一段(贴合"文本主导语义、音视频补充证据"的数据发现)。
+- **只换"融合"这一格**：`proj → cross-attention(细融合) → α 门控 → GRU → μ/σ`。**α 门控 + 异方差 σ 头原封不动** → 三大 idea 一个不丢，变成两层证据权重(cross-attn 帧级 + α 模态级)。
+- 两个岔路已定(都按稳的来)：query 用**文本**(非状态维绑定)；**保留 α**(不让 attention 吸收掉)。
+- 轻量：单层 multi-head(2–4 head)、hidden 256、加 dropout，参数 ~20–30 万(23 low 小数据，别堆深)。
+- **前置工程**：`build_features.py` 现存 pooled 单向量，要改存**序列**(Whisper 帧序列 + CLIP 每帧向量，`encoders.py` 的 `return_sequence=True`)，处理变长+padding+mask。顺带补 A8 瓶颈。
+- **强故事**：attention map 可视化"模型回答这句时盯在音频哪个韵律峰/视频哪一帧"——面试/审稿硬通货。
+- **落地顺序**：先只在 A 段换融合层 → 重训 → 用消融+Option C 跟加权和版**自己比**(不 cite 别人)；确认更好，再顺"新评估器→重出 pred→重训 B 段 LoRA"这条链升级 B 段。
+- **诚实边界**：不保证 OptC AUC 涨(功效上限在)，价值可能主要在"融合有原理+可解释+可视化"；别指望它救 σ。
+
+**★★ 项目定位对齐（2026-07-23，用户纠正我——别再搞错，compact 后必读）**
+- 项目 = **一个完整、可调用的多模态状态感知咨询对话模型**。**不是**"评估器主角 + 生成器 demo"。**评估器=感知层，B 段生成器=表达层，同等重要；B 段是用户从一开始就要的最终可调用产物，不准降级成 demo。**（我之前反复往"B 段是 demo/砍掉"上想，是拿错尺子、太任性，被用户狠批。）
+- **面试问"实际意义"的答法**：数字心理健康/情感陪伴 AI 是真实在长的赛道(Woebot/Wysa/character.ai)，现有多为纯文本、读不懂"怎么说"；我们做的是**多模态状态感知的共情咨询对话模型**——用语音语调+面部表情感知来访者心理状态(改变意愿/唤醒/效价)，据此生成更共情、更贴状态的回复；全程无人工标注、弱监督自建信号。有痛点(纯文本共情不足)+技术深度(多模态融合+弱监督+状态条件生成)+可调用产物。"我设计了个评估器"拿不出手，这个能。
+- **别拿"多模态 ppl 不显著(8.54→8.45)"否定 B 段**——那是学术指标不是产品价值。ppl 不显著的**真因 = 感知→生成耦合太松**：B 段前缀走的是原始 emb，评估器只贡献 σ 加权，**评估器感知到的状态根本没进生成**。
+- **收尾核心一枪 = 把评估器的状态(μ)真正接进生成**（状态注入 / 状态-query cross-attention / 感知器与生成器联合训练），让"感知→共情生成"名副其实，多模态价值才会在生成上体现。评估器整体消融已证感知层有料(full 0.717>no-eval 0.638)，就差把料喂给表达层。
+- **消融 / H1 / 质量判别 = 支撑证据**（证明感知层有效、多模态刚需），面试时是"你怎么证明它 work"的论据，**不是最终产品**；产品 = 那个可调用的对话模型。
+- 落地形态候选(用户提，他做过类似 demo)：**实时/流式**——每几秒一窗，音视频+ASR→编码→评估器增量前向(GRU 天生流式)出状态→驱动生成/解说，滚动展示。比离线分析更有 demo 冲击力。
+
+**★ 路线1(状态软 token 注入)结果 + 判据反思（2026-07-23）**
+把评估器 μ 编码成软 token 注入生成前缀(`--state_prefix`，代码在 model_wrap/train_mm_sft/run_mm_sft/eval_mm_ppl，产物 `outputs/mm_sft/qwen7b_state`)。
+- **holdout ppl：状态注入 8.541 vs 无状态 8.453 → 略升 0.088，按 ppl 没通过。**
+- 原因1(浅)：μ 冗余——μ 是从原始 emb/文本提炼的压缩，而生成器已有原始音视频前缀+文本，等于把已知信息再喂一遍，占注意力预算没带新信息。
+- 原因2(深,关键)：**perplexity 可能天生测不出状态价值**。ppl 奖励"复现唯一 gold 回复"，而状态的价值是"生成更贴状态的回复"，那不一定等于 gold(人写的、不为贴状态而写)→ 状态真起作用 ppl 也可能不降反升。
+- **决定：换判据。用"状态可控性"判"感知→生成"**——固定输入、人为改 μ(如 aro 0.1 vs 0.9)，看生成是否相应变化(高唤醒→更安抚 vs 低唤醒→更推进)。状态能可控操纵生成 = 感知在驱动生成(产品故事的直接证据，ppl 给不了)。
+- 还能区分：状态能操纵生成→感知→生成是实的；改了也不动→生成任务真文本主导(跟 B 段多模态不显著一致)，另想办法。
+- 按用户规则"1 通过才上 2"：1 按 ppl 没过，但可能是判据问题，**先换判据重判 1，再定上不上 2**。
+
+**★ 状态可控性测试（`demo_mm.py --sweep_dim aro --sweep_vals 0.1,0.9`，同 seed）——路线1 确认失败**
+- 每条输入把 aro 从 0.1 拧到 0.9，**生成回复一字不差、完全相同**(全 6 条零差异)。→ **状态旋钮是死的**,state token 对 logits 零影响,模型完全忽略。
+- 结合 ppl 8.541(没降)：**路线1 明确失败**——软 token 状态被彻底无视。
+- **深层判断(关键)**：病根可能是"**1 epoch LoRA + 软前缀 → 模型纯靠文本生成、忽略一切前缀软信息**"。若如此,**音视频前缀很可能也被大幅忽略**→ 正好解释 B 段多模态本身不显著(8.54→8.45)。
+- **对路线2 的影响**：cross-attention 还是注入软信息,**很可能撞同一堵墙**,不建议盲目上。
+- **下一步候选**：(1)诊断——zero 掉音视频前缀看生成变不变,确认"软前缀整体被无视"；(2)**换 hard 注入——离散状态文本标记进 prompt**(如 `[来访者:高唤醒/低效价]`),文本模型不会忽略,可控性天然成立、可解释可 demo(倾向这条)。
+- 不是"状态没价值"(评估器价值消融已证)，是**生成端注入方式**的问题；软不行换 hard。
+
+**★★ 加对话历史（2026-07-23，成功——重要进展）**
+用户指出"单句孤立会乱回复"，对。改：build_mm_sft 造 **10 轮**对话历史；data_mm 修隐藏 bug(原训第一个 assistant，多轮会训错历史回复 → 改成**只训最后一个** assistant=当前回复)；加梯度检查点、max_len 1536(token mean 582/p99 1231/max 1658，覆盖 99.8%)。
+- **holdout ppl 8.453 → 6.906（−18%）**；产物 `outputs/mm_sft/qwen7b_mm_hist`。
+- **定性质变**：无历史时生成纯 backchannel(Yeah/Mm-hmm)；带历史后生成**切题 MI 回复**——如摔跤上下文→"it sounds like you had a little bit of trouble getting around afterwards"(反映)、饮酒→"So how many days of the week do you think you drink?"(开放式提问)。连贯性明显改善。
+
+**★★ cross-attention 全链重构（2026-07-23，代码完成，待验证）**
+放弃"加冗余 μ 软 token"(诊断证明 μ 是从音视频提炼的、冗余)，改"把音视频**序列**用充分"。用户授权放手重构、不迁就旧代码。
+- `src/mpse_mvp/mm/fusion.py` **CrossAttnFusion**：text_emb 条件 **K=8** query → cross-attend 音视频序列；**α 模态门控 + attention 帧级 = 两层证据权重**；融合维 d_fuse=512(小数据抗过拟合)，输出 8 前缀 token。
+- `build_features_seq.py`：Whisper 有效帧(时长×50)→自适应池化 **64**；CLIP 每帧 CLS **8** 帧(不足补零)→ `feats_seq/`(固定长度免变长 mask)。
+- 改动链：model_wrap(`use_crossattn` 分支，pooled 保留做对照)/build_mm_sft(`--seq`)/data_mm(序列 load+collate)/train_mm_sft(**自动检测 npz 有 audio_seq→cross-attn** + 存载 fusion)/eval_mm_ppl/demo_mm(cross-attn + diag_av)。
+- **待做**：序列特征跑完 → `build_mm_sft --seq --index feats_seq`(带 10 轮历史)→ smoke → train → eval ppl + **音视频可控性诊断**(demo `--diag_av`：real vs zero 序列的差异比例；pooled 版是 2/6，看 cross-attn 能否提上去)。判据 = 音视频可控性 + ppl。
+
+**★ 路线2 结果（cross-attn，1 epoch，2026-07-23）——没成功**
+- ppl **7.011** vs pooled-历史 **6.906**(略差 0.1)；音视频可控性 diag_av **1/8**(比 pooled 版 2/6 还低)。cross-attn 两个判据都不优于 pooled。产物 `qwen7b_xattn`(cross-attn) / `qwen7b_mm_hist`(pooled+历史)。
+- **根本判断**：三种注入(状态 μ / pooled / cross-attn 序列)全试过，音视频都驱动不了生成。根因=**生成任务文本主导，10 轮历史进一步强化**(ppl 6.9 说明文本+历史已够)，音视频边际价值趋近零。跟 A 段一致：**音视频价值在感知(评估器质量判别)，不在生成**。
+- 稳健性检查：cross-attn **3 epoch → ppl 8.414**(比 1ep 7.0、比 pooled-历史 6.9 都更差 = **过拟合**),可控性仍 1/8。**"欠训"不成立,3ep 更糟。路线2 最终判定:失败。**
+- **最终结论(确定)**：音视频驱动不了生成——3 融合(状态/pooled/cross-attn)× 2 训练量(1ep/3ep)全试遍,边际价值趋近零。根因=生成任务文本主导 + 历史强化,非接法/训练量。**不上路线3。**
+
+**★★ 夜间自主工作最终局面（2026-07-23，待用户醒来拍板）**
+- ✅ **加历史生成器 = 当前最好的生成器产物**：`outputs/mm_sft/qwen7b_mm_hist`(pooled 前缀 + 10 轮历史，1 epoch，holdout ppl **6.9**)，demo 出**连贯切题的 MI 回复**(反映+提问，少数 backchannel)。这是"可调用生成器"的正面证据。
+- ✅ **评估器多模态感知有价值**：Option C full 0.717 > no-eval 0.638；H1 μ_chg AUC 0.615 / p=0.001。
+- ✗ **音视频→生成不成立**：路线1(状态注入)+路线2(cross-attn)全失败，3 融合 × 2 训练量。
+- **待用户拍板（产品定位，我不替他定）**：建议诚实定位 = **多模态感知(评估器→质量监测/督导) + 文本&对话历史驱动的连贯 MI 生成**；诚实边界"音视频价值在感知层，不在生成"。可调用系统 = 评估器感知来访者状态 + 生成器出连贯回复。要不要接受这个定位，还是别的方向，等用户定。**没继续盲跑路线3(数据结论已确定)。**
+- 产物清单：`qwen7b_mm_hist`(pooled+10轮历史)、`qwen7b_mm`(无历史 8.45,旧)、`qwen7b_text`(纯文本对照)、`qwen7b_xattn/xattn3`(cross-attn 失败探索)、`qwen7b_state/stateonly/tag`(μ注入探索,可控性全0)、评估器 `pred_mm2.jsonl` + 消融脚本。
+
+**★★★ 收尾定案（2026-07-23，用户拍板——最终方向,compact 必读）**
+- **定位(简历项目,非论文)**:讲**架构设计思路的完整性**,不纠结 μ/σ 单独显著性;可挑最好结果讲。
+- **评估器**:多模态状态评估器,价值靠**它自己的整体消融**证(质量判别 full 0.717 > no-eval 0.638;四开关)——正面、要讲。
+- **生成器最终定版 `qwen7b_final`**:文本 + **40 轮对话历史** + **μ 状态标记注入 prompt** + **σ 样本加权**。音视频不直接进生成器,而是 →评估器→ μ →标记→ prompt(评估器是音视频通往生成的提炼桥)。
+  - 历史 40 轮(覆盖 85% 会话完整对话;per-session client turns median 14/p75 28/p90 47/max 191);max_len 2048,**左截断保 target**(data_mm 已修 mask)。
+- **baseline 对比**:**vs 基模 Qwen zero-shot**(ppl 566 → ~7)。标准、必有;诚实知道它主要证"SFT 有效"这个常识。
+- **不做**(暴露短板或低级):无历史对比(对话考虑上下文是基本要素)、μ/σ 单独消融、多模态 vs 纯文本消融。
+- **μ/σ 讲法边界**:讲"评估器 μ/σ → σ 加权 + μ 标记注入"这个**架构设计**(自洽、可画框图);诚实局限"注入效果在本数据不显著、μ 可控性弱"。**不吹"状态可控驱动生成"**(实测可控性 0,demo 会露馅)。
+- **诚实全景(内部留底,不对外吹)**:软 token 注入(μ/音视频)× 文本标记,可控性**全 0**。根因=**gold 回复按来访者内容写、跟评估器状态无训练关联,SFT 学会忽略标记**——所以"状态驱动生成"在 SFT+这份数据下学不出。但作为架构设计接上、讲思路,简历成立。真正正面的证据是:评估器质量判别消融 + 生成器 vs 基模 + 加历史的连贯 MI 回复。
+
+**★ 最终定版结果（2026-07-23，`qwen7b_final`）**
+- 配置:40 轮历史 + μ状态标记 + σ加权;text_only(音视频不进生成器,经评估器→μ);max_len 2048,左截断保 target。
+- **holdout ppl 7.03**;**base Qwen zero-shot(同样吃 40 轮历史+标记)= 39.71**。
+- **baseline 主用 39.7→7(SFT 净贡献,5.6×)**——同输入下 SFT vs zero-shot,隔离了 SFT 贡献、公平严谨;**别用 566→7**(那是 有历史 vs 无历史,混了变量)。
+- demo:有实质 MI 回复(如 "So how many days per week do you tend to drink?"),但本批 backchannel 偏多(6/8);demo CLIENT 行显示成了状态标记(显示 bug,待修:露出实际 client 话)。
+- **收尾清单齐**:评估器整体消融(0.717>0.638)+ 生成器 vs zero-shot(39.7→7)+ 架构(μ/σ 注入)+ 连贯 demo。
+- 待做小收尾:① 修 demo 显示 ② 挑实质回复多的样例做展示 ③ 重写 README。
+- **战略判断(供醒来决策)**：若 3ep 仍不行，坐实"音视频驱动不了生成"。诚实产品定位 = **多模态感知(评估器，质量监测/督导)+ 文本&对话历史驱动的连贯 MI 生成**(加历史的生成器 ppl 6.9、demo 切题，本身是好的可调用产物)。不硬凑"音视频驱动生成"——数据不支持。按用户规则"2 有效果才上 3"，2 没效果**不上路线3(联合训练大概率撞同墙)**。
+
+**用户授权（2026-07-23）**：① 旧代码可放手重构，别为迁就旧代码丢质量，项目为主；② 回复不要英文(已存 memory)；③ 睡觉期间授权自主推进，需拍板认真定、记 notes。
 
 ---
 
@@ -81,7 +433,7 @@
 ### 三个核心 idea（项目灵魂，真正属于用户自己的东西）
 
 1. **μ / σ / α**：异方差回归一次前向同时输出状态均值、不确定性、模态门控权重。
-2. **用 Δμ 找"有效回复"**：连续两个 user turn 之间状态下降（Δμ<0）即认为上一条咨询师回复有效。
+2. **用 Δμ / 状态轨迹找信号**：原设想"相邻 turn 状态下降=上条回复有效"，但 AnnoMI gold 的 **F1 premise 推翻了逐句因果**（§6.8）。**已改口径为会话级轨迹形状**（F2/F3：high 单调爬升、low 中段塌陷）；Δμ 只作 proxy 排序信号，非因果有效性判定。
 3. **用 σ 反哺训练**：样本权重 `w = exp(-λ·σ̄)`，越不确定权重越低，自动降权低置信样本。
 
 ### 8 阶段闭环
@@ -93,116 +445,49 @@
 | 2 | 造 MPSE 训练集（X=文本 emb + 4 标量, Y=y_soft, Q=质量权重） | `outputs/mpse/<sid>/train.npz` |
 | 3 | 训 MPSE（MLP + 质量加权异方差高斯 NLL + α 熵正则） | `mpse.pt` / `meta.json` |
 | 4 | upgrade：写 μ/σ/α/weight/effective/p_ok | `outputs/upgrade/<sid>/turns_upgraded.jsonl` |
-| 5 | 造 SFT 目标（**现在靠人工填 `therapist_reply`**） | `outputs/sft/<sid>/sft_train.jsonl` |
-| 6 | Whisper/CLIP 编码音视频，缓存 per-turn 特征 | `outputs/mm_cache/<sid>/turn_*.npz` + `mm_index.jsonl` |
-| 7 | 多模态前缀 + LoRA SFT | `outputs/mm_sft/<sid>/mm_prefix.pt` + `lora_adapter/` |
+| 5 | 造 SFT 目标（AnnoMI：`therapist_reply` 数据里现成） | `data/annomi/mm_sft/{train,holdout}.jsonl` |
+| 6 | Whisper/CLIP 编码音视频，缓存 per-turn 特征 | `data/annomi/feats/*.npz` + `index.jsonl` |
+| 7 | 多模态前缀 + LoRA SFT | `outputs/mm_sft/<run>/mm_prefix.pt` + `lora_adapter/` |
+
+> **AnnoMI 版把 0/1/5 基本免掉**：`timestamp`→turn 边界、`interlocutor`→角色、`therapist_reply`→SFT 目标全是现成的；产物统一在 `data/annomi/`。上表阶段 0–4 的 `outputs/<sid>/` 路径是旧的逐 session 布局，仅作概念参照。
 
 ---
 
-## 3. ⚠️ 代码有两份，git 仓库那份是过时的
+## 3. 代码历史（已解决，仅留结论）
 
-| | `C:\Users\qmn20\Yuan-chat`（git 仓库） | `C:\Users\qmn20\Desktop\Yuan-chat\待打包材料\Yuan-chat` |
-|---|---|---|
-| 代码时间 | 2026-02-03（commit `251d4f8 daily modify`） | 最新（README 描述的就是这份） |
-| 数据 | 只有 S0001，16 turns | **S0001–S0019，371 turns** |
-| 训练产物 | 无 | `mm_sft/ALL`（LoRA + mm_prefix.pt，已训完） |
-| 版本控制 | 有 `.git`，remote = github.com/Magunm-7/Yuan-chat | **无 git** |
-| 嵌套 | 真代码在子目录 `mpse_full_loop_project/` | 直接平铺 |
+早先代码有两份（git 仓库 2 月旧版 vs 桌面新版），且 label-mask / sample_weight / α-video 键 / LoRA 冻结等一批 bug 只在桌面版修过。**2026-07-22 已把桌面新版搬进 git 仓库、拍平嵌套目录、加 `.gitignore`**，双份问题消失，上述修复都在当前代码里。此后又基于 AnnoMI 重建了评估管线（见 §6.8 之后）。原始的双份对照表已无用，删。
 
-**git 仓库的 README.md 是 2026-02-25 单独更新的，描述的是桌面那份新代码**，所以 README 和同仓库的代码对不上（README 讲 pipeline 开关、`merge_mm_index.py`、Qwen3-8B，仓库代码里全都没有）。这是当初"README 说 Qwen3-8B 但 config 是 Llama-3.2-3B"那个矛盾的真正原因——不是笔误，是**代码没推上去**。
+## 4. 代码地图
 
-### 新版相比 git 版多了什么
-
-- `configs/default.yaml`：新增 `pipeline:` 分阶段开关 + `upgraded_policy: skip_if_exists`（保护手改的 `turns_upgraded.jsonl`）、`dialogue:` 段；模型从 Llama-3.2-3B 换成 **Qwen3-8B**；`session.id: "ALL"`
-- `scripts/run_full_loop.py`：7128 → 15328 字节，加了分阶段开关、`--session_id` 覆盖、train-only 快捷路径、缺文件的显式报错
-- `scripts/merge_mm_index.py`（新）：把 19 个 session 的 mm_index 合并成 `outputs/mm_cache/ALL/mm_index.jsonl`
-- `src/mpse_mvp/segment/diarize.py`（新）：MFCC + 手写 kmeans(k=2) 的轻量说话人分离 —— **写了但没接进 build_turns.py，目前是死代码**
-- `src/mpse_mvp/sft/build_sft_from_pairs.py`（新）：dialogue 模式下用真实 assistant 回复造 SFT
-- `src/mpse_mvp/pipeline/build_turns.py`：5543 → 11462 字节，加了 dialogue 模式（交替分配 role）、`force_single_turn`
-
-### 新版已经修掉的旧 bug
-
-- ✅ **SFT 目标模板污染**：旧 `teacher_generate.py` 用 `split("ASSISTANT:")[-1]` 抽不出 Llama chat 模板，整个 prompt 被当训练目标。新版 `teacher.enabled=false`，改走人工 `therapist_reply`，绕开了。
-- ✅ **label 没做 mask**：旧 `data_mm.py` 里 `labels = input_ids.clone()`，system+user 也在算 loss。新版 `_build_prompt_and_full()` 正确把 prompt 部分置 -100，**只训 assistant token**。
-- ✅ **sample_weight 用错**：旧 model_wrap 拿 batch 里权重的均值去缩放整个 loss。新版改成 per-token CE + per-sample 归一 + 逐样本加权。
-- ✅ **α 的 video 键拿错**：旧 cache_builder `v = alpha_dict.get("audio", ...)`（复制粘贴错误，video 权重取到了 audio）。新版已 BUGFIX。
-- ✅ **LoRA 被冻住**：新版 freeze 逻辑认 `.lora_A/.lora_B`，并显式解冻 projector / mu_head。
-
----
-
-## 4. 代码地图（以桌面新版为准）
-
-```
-configs/default.yaml              全局配置：pipeline 开关 / VAD / ASR / 弱监督 / MPSE / upgrade / mm / mm_sft
-scripts/
-  run_full_loop.py                主编排，7 阶段各有开关；--session_id 可覆盖
-  merge_mm_index.py               合并各 session 的 mm_index -> ALL
-  demo_mm.py                      推理 demo：加载 LoRA + mm_prefix，前 5 条生成回复
-  download_models_ms.py           ModelScope 下模型
-src/mpse_mvp/
-  segment/
-    extract_audio.py              ffmpeg mp4 -> 16k 单声道 wav
-    vad.py                        能量 VAD（分帧 RMS > thr），非重叠帧
-    diarize.py                    ★ MFCC + kmeans(k=2) 说话人分离 —— 未接入
-    io.py                         soundfile 读 wav
-  asr/whisper_asr.py              faster-whisper 整段转写 + 按时间窗 gather_text
-  features/
-    text_features.py              q_text = clip(len/40); 4 维简单文本特征（长度/否定词/问号/叹号）
-    audio_features.py             q_audio = RMS/MAD 的 SNR 代理; stress_proxy = 谱质心归一化
-    video_features.py             MediaPipe FaceLandmarker -> q_video(人脸可见率) + microexpr_rate(关键点位移/眼距)
-  supervision/
-    agents.py                     三路弱打分器 + 按质量加权融合 fuse_labels
-    llm_rater.py                  LLM 按临床 rubric 输出 {dep,sad,anx,stress} 严格 JSON
-  pipeline/
-    build_turns.py                VAD -> (可选 diarize/dialogue) -> 三路打标 -> turns.jsonl
-    build_mpse_trainset.py        X = 文本 emb(mean-pool) ⊕ [q_text,q_audio,q_video,microexpr]; Y=y_soft; Q=质量
-  mpse/
-    model.py                      2 层 MLP -> 三头: α(softmax over 3) / μ(sigmoid) / logvar(clamp -6..2)
-    train.py                      loss = 质量加权高斯 NLL + 0.01·(-α 熵)
-  upgrade/upgrade.py              推理写 μ/σ/α; w=exp(-λσ̄); Δμ<0 -> effective_raw; σ<σ_max 才 trusted; p_ok=Φ((τ-μ)/σ)
-  sft/
-    build_sft.py                  从 turns_upgraded 造 SFT，assistant 取人工填的 therapist_reply
-    build_sft_from_pairs.py       dialogue 模式：assistant 取 pairs.jsonl 里的真实回复
-    teacher_generate.py           自蒸馏造回复（已弃用，teacher.enabled=false）
-  mm/
-    encoders.py                   WhisperAudioEncoder(encoder mean-pool) / CLIPVideoEncoder(CLS over frames)
-    cache_builder.py              per-turn 存 audio_feat/video_feat/alpha(2维)/mu
-    projector.py                  SoftTokenProjector: (B,C) -> (B,K,D) 的 K 个软 token
-    model_wrap.py                 MultiModalPrefixLM: 音/视频软 token 拼在 embedding 前，α 缩放，prefix 位置 label=-100
-    data_mm.py                    ★ 只训 assistant token 的 label mask + collate
-    train_mm_sft.py               冻结基座 + LoRA(q/k/v/o_proj, r=8) + 训 projector，存 mm_prefix.pt & lora_adapter
-```
+> **2026-07-22 代码清理**：旧的逐 session MVP loop **全删（~23 文件）**——`scripts/{run_full_loop,run_all,merge_mm_index,label_aro_val}`、`src/mpse_mvp/` 下 `asr`/`encoders`/`pipeline`/`sft`/`supervision`/`upgrade` 整包 + `segment/{vad,diarize,extract_audio}` + `features/video_features` + `mm/cache_builder` + `mpse/{model,train}` + `utils.py`、`configs/default.yaml`。这些只被旧编排器串起来，跟 live 管线零交集；删后 import 冒烟已过。README 还引用它们，待重写。
 
 ### 关键超参
-- `indices.names = [dep, sad, anx, stress, microexpr_rate]`，τ 全 0.30
-- `upgrade.sigma_lambda = 2.0`，`sigma_max = 0.12`
+- ~~`indices.names = [dep,sad,anx,stress,microexpr_rate]`~~ → **AnnoMI 版维度是 chg / aro / val**
 - `mm.n_frames = 8`，`k_audio = k_video = 8`
-- `mpse: epochs=5, bs=8, lr=3e-4, hidden=256, dropout=0.1`
-- `mm_sft: bs=1, lr=2e-4, epochs=1, max_len=1024`；LoRA r=8, alpha=16, dropout=0.05
+- `mm_sft: bs=1, lr=2e-4, epochs=1, max_len=512`；LoRA r=8, alpha=16, dropout=0.05
+
+### ★ AnnoMI 评估管线（当前实际在用的代码）
+```
+src/mpse_mvp/data/annomi.py       AnnoMI CSV → turns_client.jsonl + manifest（清洗:丢<2s / 时间戳倒序）
+scripts/
+  label_chg_zeroshot.py           chg 弱标签: bart-large-mnli zero-shot（AUC 0.667 vs gold）
+  label_affect.py                 强 rater: aro=wav2vec2 arousal; val=ASD 选来访者脸+FER → turns_labeled.jsonl
+  build_features.py               per-turn text(MiniLM384)/audio(Whisper768)/video(CLIP768) → feats/*.npz + index.jsonl
+  train_mpse.py                   多维 MPSE(GRU+sigmoid α+异方差) session-CV 袋外预测 → pred_mm2.jsonl
+  test_multimodal_value.py        Option C: 轨迹形状 ridge probe → mi_quality（chg-only vs 多模态）
+  build_mm_sft.py                 B 段数据: 三表 join → mm_sft/{train,holdout}.jsonl + npz
+  run_mm_sft.py                   B 段启动器: 调 train_mm_sft(单一 index); --text_only 对照
+  eval_mm_ppl.py                  B 段: holdout assistant-token perplexity(base/text-only/multimodal)
+src/mpse_mvp/eval/
+  metrics.py h1.py h2.py h3.py split.py   纯 numpy: AUC/Spearman/bootstrap/置换检验; H1/H2/H3; session 分层划分
+src/mpse_mvp/mm/ (B 段复用,未大改)  projector / model_wrap(MultiModalPrefixLM) / data_mm / train_mm_sft
+```
 
 ---
 
-## 5. 真实进度（★ 推翻旧存档笔记的结论）
+## 5. 弃用数据说明（历史）
 
-旧存档笔记（6-11）说"标签几乎是常数、`effective_trusted` 全场为 0、Δμ 灵魂命题没演示出来"——**那是基于 git 仓库那份 2 月的旧 S0001 数据**。新版数据已经不是这样了：
-
-| 指标 | 旧（git repo S0001） | 新（桌面 19 sessions） |
-|---|---|---|
-| session 数 | 1 | 19 |
-| user turn 数 | 16 | **371** |
-| y_soft 动态范围 | dep 全在 0.24–0.29（≈常数） | **0.15 – 0.60**（有真实区分度） |
-| σ 范围 | 0.07 – 0.71（太大） | **0.05 – 0.44**（多数 <0.12） |
-| effective_raw | 7 | **182** |
-| effective_trusted | **0** | **133** |
-| α | 近乎常数（std 0.03） | **std 0.08–0.10，范围 0.01–0.77** |
-
-**所以"用 Δμ 找有效回复"这个灵魂命题现在是演示出来了的**，α 也有了真实区分度。这是项目最大的进展，之前的自我评价（包括简历里那句"暂无量化结果"）已经过时。
-
-### 已完成
-- 19 段访谈全部跑完 0–6 阶段
-- 371 个 user turn 中 **268 个已人工补上 `therapist_reply`**（对照 `可用对话/*.pdf` 转录稿抄的）
-- `mm_cache/ALL/mm_index.jsonl` 已合并（371 条）
-- **MM-SFT 已训完**：`outputs/mm_sft/ALL/` 有 `mm_prefix.pt`(138MB) + `lora_adapter/`(31MB)
+19 段 / 371 turn 的桌面数据（用户自演的烟雾测试）**已弃用**，被 AnnoMI 取代（§6.8 起）。当时基于它得出的"Δμ 找有效回复已演示出来"的结论，后来被 AnnoMI gold label 的 **F1 premise 直接推翻**（逐句归因是空的，见 §6.8 premise 实测）——转移头因此砍掉。别再引用这批数据的任何数字。
 
 ---
 
@@ -216,12 +501,8 @@ src/mpse_mvp/
   诚实边界：**不声称跨语言临床有效性**。
 - **中英差别远不止翻译**。除了 tokenization、ASR/LLM 质量不对称之外，最深的一层是「心理痛苦的表达是文化绑定的」（中文更躯体化），**构念本身不跨语言**。这是上面选英文的真正理由，不是图省事。
 
-**关于切分**
-- 切分要用 **speaker diarization（pyannote / WhisperX）**，不是"很吊的多模态方案"。
-  → 对照现状：`segment/diarize.py` 里是自己手写的 MFCC + kmeans(k=2)，且**没接进 build_turns**。当前实际走的是"人工剪掉机器声音 + 能量 VAD"。接 pyannote 是这条决策的落地动作。
-
-**还没解的**
-- 真实数据具体用哪一个：AnnoMI 做主数据？DAIC-WOZ / CMDC 做带标签的外部验证（正好补第 6.5 节 A1 那个循环论证的窟窿）？**这是上游决定，定了它，切分方式和模态配置才有答案。**
+**关于切分（已被 AnnoMI 免掉）**
+- 原计划接 speaker diarization(pyannote/WhisperX) 替手写 MFCC+kmeans。**选 AnnoMI 后作废**——`timestamp` 给 turn 边界、`interlocutor` 给角色，都是数据里现成的（§6.8）。数据最终定 **AnnoMI 单一主数据**（DAIC-WOZ/CMDC 未采用，§6.8 有对比）。
 
 **用户画像（advising 时的背景）**
 - 双非本科 + UNSW AI 方向硕士（2027.01 毕业），英语不差。
@@ -250,13 +531,6 @@ src/mpse_mvp/
 - ~~代码没推 GitHub、仓库停在 2026-02-03~~ → 已把最新代码搬进仓库、拍平嵌套目录，分支 `sync-latest-code`
 - ~~目录 cruft：`mpse_full_loop_project/`、`data & output/`~~ → 已删，并加了 `.gitignore`
 
-### 数据相关 —— ⚠️ 不在当前范围，仅作记录
-> 以下全部属于弃用数据的产物，**不要去修**。换数据后这些问题自然消失，或需重新评估。
-- 102/371 个训练样本的 target 是字面量 `(FILL_THERAPIST_REPLY_HERE)`（`build_sft.py` 在 reply 为空时填占位符，下游没过滤）。
-  → 但这**暴露了一个真实的代码缺陷**：`build_sft.py` 缺 `skip_if_no_pair` 那样的过滤开关，而 `build_sft_from_pairs.py` 里有。换数据后同样会踩，属于范围内要修的。
-- `mm_cache/ALL/mm_index.jsonl` 里 npz_path 是 Linux 绝对路径 `/home/qmn/...`，Windows 上读不到（同上，根因是第 3 条）。
-- `mm_cache/S0003` 有 48 个 npz 但 index 只有 12 条（旧运行残留）；`mm_cache/S0009` npz=23 但 index=24，少一个会抛异常。
-
 ---
 
 ## 6.5 方法架构评估（2026-07-22）
@@ -264,6 +538,8 @@ src/mpse_mvp/
 > 前提：**先不看现有训练集**，只评方法本身是否立得住。
 > 结论先行：**架构骨架是站得住的，三个核心 idea 也是真的。缺的不是想法，是"闭环验证"那一环。**
 > 下面 9 条按"会不会被内行一戳就穿"排序。
+>
+> **状态注（这 9 条是当时的诊断，多数已处理）**：A1 循环论证 → AnnoMI gold(`talk_type`) 补上、H1 已验证；A2 真多模态输入 → 已重建吃 Whisper/CLIP 序列；A4 Δμ 逐句因果 → 被 F1 premise 直接推翻、转移头已砍；A5 时序 GRU → 已加；A7 sigmoid α 门控 → 已改；A9 纯文本对照 → B 段正在做。剩 **A8（Q-Former 式 cross-attention）** 是唯一没做的加分项。细节见 §6.8 架构锁定 + §7。
 
 ### A 段（MPSE 评估器）
 
@@ -322,19 +598,19 @@ MPSE 输出 3 维 α (T/A/V)，`cache_builder` 只取 (A, V) 两维缩放前缀�
 
 判断：**不远，而且差的全是同一类东西 —— 让它从"一条能跑通的 pipeline"变成"一个有结论的实验"。**
 
-8 阶段闭环能跑通本身是硬本事，很多人做不到。但一个项目要讲得完整，需要三件套：**方法 + 能跑的系统 + 有对照的结果**。你有前两件，第三件是零。
+项目要讲得完整，需要三件套：**方法 + 能跑的系统 + 有对照的结果**。前两件早有，第三件（有对照的结果）**A 段已拿到**（H1/H2/H3 + Option C），B 段正在补。
 
-必须补的清单（按必要性排，做完就算完整）：
+七件套现状：
 
-| # | 事项 | 说明 |
+| # | 事项 | 状态 |
 |---|---|---|
-| 1 | **按 session 划 train/val/test** | 绝对不能按 turn 划，同一段访谈会泄漏 |
-| 2 | **纯文本 LoRA baseline** | 关掉前缀跑一遍，这是所有对比的地基 |
-| 3 | **σ 校准图** | 样本按 σ 分箱，看每箱实际误差是否单调上升。**这一张图就能证明 σ 不是摆设** |
-| 4 | **MPSE held-out 指标** | NLL / MAE / α 分布图 |
-| 5 | **B 段 held-out perplexity + 定性样例** | 多模态 vs 纯文本各挑几条 |
-| 6 | **四个消融开关** | 去音频 / 去视频 / 去 α 门控 / 去 σ 加权 |
-| 7 | **README 写清结果** | 包括"什么没做到"，这比吹更值钱 |
+| 1 | 按 session 划 train/val/test | ✅ `splits.json`（5 折 + holdout，校验无泄漏） |
+| 2 | 纯文本 LoRA baseline | ◐ B 段 `text_only` 对照，训练中 |
+| 3 | σ 校准（非循环） | ✅ H3；但 σ 大多贴地板，区分度弱（如实记） |
+| 4 | MPSE held-out 指标 | ✅ H1 AUC 0.615 / F1 0.64 / bal-acc 0.584 |
+| 5 | B 段 held-out perplexity + 定性样例 | ✅ base 566 / text 8.54 / mm 8.45（见 §0.3） |
+| 6 | 四个消融开关（去音/视/α/σ） | ✅ `ablate_mpse.py`，3-seed，见下 |
+| 7 | README 写清结果（含"没做到"） | ☐ 最后做 |
 
 **不需要**：真实临床数据、SOTA、论文、更大的模型。
 
@@ -571,18 +847,11 @@ MPSE 输出 3 维 α (T/A/V)，`cache_builder` 只取 (A, V) 两维缩放前缀�
 - B. 多模态价值移到**生成器**(音视频语境→更好回复,perplexity)。
 - C.(有意思)测**多模态状态(chg+aro+val)的轨迹**能否比 chg-only 更好地区分 mi_quality(gold)。→ 多模态用"质量区分"证明价值,绕开"aro/val 无 gold"。gold=mi_quality 是现成的。
 
-### Option C 初步结果（2026-07-22）
-多维 MPSE(chg+aro+val)训好,袋外 CV。**多模态状态轨迹 → mi_quality 区分**:
-- chg-only: AUC 0.538 [CI 0.37, 0.71]
-- chg+aro+val: AUC **0.591** [CI 0.40, 0.77]
-- 差 **+0.053**,方向正确(多模态有帮助)。
-⚠️ 但 CI 重叠严重(15 low / 104 session),**未达显著**。功效不足(low 仅 23),初步信号非定论。
-增强方向:① 换强文本编码器(chg 基线现 0.592,受 MiniLM 0.61 上限压制);② aro/val 弱标签较粗(尤其 val 的 smile 几何),可改用面部情感模型/更好韵律;③ 数据功效受限(low 少),难解。
-✅ eval 符号已统一(高 μ=change);已加 precision/recall/F1 + 平衡准确率。
+→ **结局**:选了 C(=Option C),强标签重训后 0.524→**0.631**(见上"强标签后 Option C 翻倍");B(生成器多模态语境)正在 B 段做。上表 0.592 是 crude 标签初版,chg 最终 0.611。
 
 ### 本机环境（重要）
 `C:\Users\qmn20` 是裸 Windows：**只有 numpy，无 torch/transformers/ffmpeg/yt-dlp**。
-→ 所有 torch/模型/编码/训练代码都得在**租的 H800 服务器**上跑，本机只能写+跑纯 numpy/csv 逻辑。
+→ 所有 torch/模型/编码/训练代码都得在**租的 AutoDL 服务器（4080S vGPU）**上跑，本机只能写+跑纯 numpy/csv 逻辑。
 → 因此开发策略：本机先写能自测的纯 numpy 部分（数据适配、划分、评估脚本），torch 部分写好待服务器验证。
 
 ### 进度（按 `docs/eval-design.md` §5）
@@ -590,14 +859,14 @@ MPSE 输出 3 维 α (T/A/V)，`cache_builder` 只取 (A, V) 两维缩放前缀�
 - [x] chg 维度：premise 已确认活着，**锁定为验证维度**（不必再写 probe）
 - [x] **4. `eval/split.py`**：按 session 分层 5 折 + holdout → `splits.json`，校验无泄漏
 - [x] **7. `eval/{metrics,h1,h3}.py`**：纯 numpy，**已用合成数据自测通过**（H1 判定逻辑、H3 非循环校准曲线、置换检验、bootstrap CI 都对）。schema 已钉死：predictions jsonl = `{session_id,turn_id,mi_quality,talk_type,mu:{chg},sigma:{chg}}`
-- [ ] 2b. `probe_dims`（val/aro/eng 部分）：**阻塞于音视频**，等下载后做
-- [ ] 3. 下载 117 视频抽 wav ← **关键路径,需服务器 + yt-dlp/ffmpeg**
-- [ ] 5. 编码器(Whisper/CLIP 序列) + MPSE(GRU + sigmoid α 门控 + 真多模态输入) 改造（torch，服务器验证）
-- [ ] 6. 训 MPSE + upgrade（服务器）
-- [ ] 7b. h1/h3 跑真实预测（分水岭）+ `eval/h2.py` 轨迹形状
-- [ ] 9. 生成器 demo + perplexity；10. 重写 README
+- [x] 2b. `probe_dims`（aro/val）：强 rater 落地（aro=wav2vec2 arousal、val=ASD+FER），写入 `turns_labeled.jsonl`
+- [x] 3. 下载 128 视频抽 wav（本机下 → scp → 服务器 ffmpeg）
+- [x] 5. 编码器(Whisper/CLIP) + MPSE(GRU + sigmoid α + 真多模态输入) 改造，`build_features.py` 缓存特征
+- [x] 6. 训 MPSE（session-CV 袋外预测 → `pred_mm2.jsonl`）
+- [x] 7b. h1/h3 跑真实预测 + Option C（`eval/h2.py` 轨迹形状留待与 B 段一起收尾）
+- [ ] 9. B 段生成器 demo + perplexity（进行中，见 §0.3）；10. 重写 README
 
-**当前关键路径 = 服务器 + 视频下载**（步骤 3）。它一通，后面 5/6/7b 才能跑。本机能写的纯 numpy 件已基本铺完。
+**当前关键路径 = B 段**（Qwen2.5-7B 多模态 LoRA，见 §0.3）。A 段评估器已完成并验证。
 
 ### 顺带要修的工程债（穿插进上面，非独立阶段）
 - [ ] `paths.models_root` 收编硬编码模型路径 + `face_landmarker.task`
@@ -606,7 +875,7 @@ MPSE 输出 3 维 α (T/A/V)，`cache_builder` 只取 (A, V) 两维缩放前缀�
 - [ ] 口径修正：σ→noise estimate、Δμ→proxy/轨迹信号（改 README/docstring）
 
 ### 挂起
-- [ ] 生成器基模选型：迭代期中等模型、展示期大模型；待架构就绪后联网拉当前开源清单比对
+- [x] 生成器基模选型：迭代期 **Qwen2.5-7B-Instruct**（展示期再上 Qwen3-8B/更大）
 - [ ] 仓库转公开 + push（用户已定：**做完再转**；目前私有）
 - [ ] （可选）用 `AnnoMI-full` 细行为子类再挖一次逐句效应 [premise B 分支，预判弱信号]
 

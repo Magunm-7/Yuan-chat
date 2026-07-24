@@ -47,6 +47,53 @@ def load_sessions(index_path, labels_path, modalities, dims):
     return sessions, feat_dims
 
 
+def run_cv(sessions, feat_dims, splits, mods, dims, *, hidden=256, epochs=60, lr=1e-3,
+           use_gru=True, use_alpha=True, loss="nll", seed=0, dev=None):
+    """Session-CV training -> leakage-free out-of-fold mu/sigma predictions (reusable by ablation)."""
+    import torch
+    from mpse_mvp.mpse.model_mm import MPSE_MM, hetero_nll
+    if dev is None:
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.manual_seed(seed); np.random.seed(seed)
+
+    def to_dev(feats):
+        return {m: torch.from_numpy(feats[m]).unsqueeze(0).to(dev) for m in mods}
+
+    preds = []
+    for cf in splits["cv_folds"]:
+        test = [s for s in cf["test_sessions"] if s in sessions]
+        train = [s for s in cf["train_sessions"] if s in sessions]
+        model = MPSE_MM(feat_dims, mods, hidden=hidden, num_idx=len(dims),
+                        use_gru=use_gru, use_alpha=use_alpha).to(dev)
+        opt = torch.optim.AdamW(model.parameters(), lr=lr)
+        model.train()
+        for ep in range(epochs):
+            for i in np.random.permutation(len(train)):
+                feats, Y, q, _ = sessions[train[i]]
+                ft = to_dev(feats)
+                yt = torch.from_numpy(Y).unsqueeze(0).to(dev)
+                qt = torch.from_numpy(q).view(1, -1).to(dev)
+                mu, sigma, alpha, logvar = model(ft)
+                if loss == "nll":
+                    l = hetero_nll(mu, logvar, yt, weight=qt)
+                else:
+                    l = (((mu - yt) ** 2).mean(-1) * qt).mean()
+                opt.zero_grad(); l.backward(); opt.step()
+        model.eval()
+        with torch.no_grad():
+            for sid in test:
+                feats, Y, q, meta = sessions[sid]
+                mu, sigma, _, _ = model(to_dev(feats))
+                mu = mu.squeeze(0).cpu().numpy(); sg = sigma.squeeze(0).cpu().numpy()
+                for j, (tid, tt, mq) in enumerate(meta):
+                    preds.append({
+                        "session_id": sid, "turn_id": tid, "mi_quality": mq, "talk_type": tt,
+                        "mu": {d: float(mu[j, k]) for k, d in enumerate(dims)},
+                        "sigma": {d: float(sg[j, k]) for k, d in enumerate(dims)},
+                    })
+    return preds
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--index", default="data/annomi/feats/index.jsonl")
@@ -60,57 +107,20 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no_gru", action="store_true")
+    ap.add_argument("--no_alpha", action="store_true")
     ap.add_argument("--loss", default="nll", choices=["nll", "mse"])
     args = ap.parse_args()
 
-    import torch
-    from mpse_mvp.mpse.model_mm import MPSE_MM, hetero_nll
-
-    torch.manual_seed(args.seed); np.random.seed(args.seed)
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
     mods = tuple(args.modalities.split(","))
     dims = tuple(args.dims.split(","))
-
     sessions, feat_dims = load_sessions(args.index, args.labels, mods, dims)
     splits = json.load(open(args.splits, encoding="utf-8"))
     print(f"dims={dims} modalities={mods} feat_dims={feat_dims} sessions={len(sessions)}")
 
-    def to_dev(feats):
-        return {m: torch.from_numpy(feats[m]).unsqueeze(0).to(dev) for m in mods}
-
-    preds = []
-    for cf in splits["cv_folds"]:
-        test = [s for s in cf["test_sessions"] if s in sessions]
-        train = [s for s in cf["train_sessions"] if s in sessions]
-        model = MPSE_MM(feat_dims, mods, hidden=args.hidden, num_idx=len(dims),
-                        use_gru=not args.no_gru).to(dev)
-        opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
-        model.train()
-        for ep in range(args.epochs):
-            for i in np.random.permutation(len(train)):
-                feats, Y, q, _ = sessions[train[i]]
-                ft = to_dev(feats)
-                yt = torch.from_numpy(Y).unsqueeze(0).to(dev)          # (1,T,D)
-                qt = torch.from_numpy(q).view(1, -1).to(dev)
-                mu, sigma, alpha, logvar = model(ft)
-                if args.loss == "nll":
-                    loss = hetero_nll(mu, logvar, yt, weight=qt)
-                else:
-                    loss = (((mu - yt) ** 2).mean(-1) * qt).mean()
-                opt.zero_grad(); loss.backward(); opt.step()
-        model.eval()
-        with torch.no_grad():
-            for sid in test:
-                feats, Y, q, meta = sessions[sid]
-                mu, sigma, _, _ = model(to_dev(feats))
-                mu = mu.squeeze(0).cpu().numpy(); sg = sigma.squeeze(0).cpu().numpy()
-                for j, (tid, tt, mq) in enumerate(meta):
-                    preds.append({
-                        "session_id": sid, "turn_id": tid, "mi_quality": mq, "talk_type": tt,
-                        "mu": {d: float(mu[j, k]) for k, d in enumerate(dims)},
-                        "sigma": {d: float(sg[j, k]) for k, d in enumerate(dims)},
-                    })
-        print(f"  fold {cf['fold']}: train {len(train)}, predict {len(test)}")
+    preds = run_cv(sessions, feat_dims, splits, mods, dims,
+                   hidden=args.hidden, epochs=args.epochs, lr=args.lr,
+                   use_gru=not args.no_gru, use_alpha=not args.no_alpha,
+                   loss=args.loss, seed=args.seed)
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
