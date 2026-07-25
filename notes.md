@@ -36,7 +36,11 @@
   - **换实例**:数据盘(`/root/autodl-tmp`: qwen3 env 6.4G / 模型 43G / 词典 / 备份包)AutoDL 迁移能带走;**系统盘 `/root/Yuan-chat`(代码/产物/数据)会丢 → 从备份包解压恢复**。
   - **env 若丢的重建**:clone base → `pip install transformers==4.51.3 spacy` + `python -m spacy download en_core_web_sm` + faithfulness 依赖;pip 损坏见 §Qwen3 分支"坑1"(bundled wheel `--ignore-installed` 自举)。
 - **服务器路径速查**:代码 `/root/Yuan-chat`;14B env `/root/autodl-tmp/envs/qwen3/bin/python`;7B 用 `/root/miniconda3/bin/python`;模型 `/root/autodl-tmp/models/`;词典 `/root/autodl-tmp/concreteness.txt`;HF 缓存 `/root/autodl-tmp/hf`;`ssh autodl-mpse`;启 demo `bash /root/start_demo.sh`。
-- **换卡后要做的**:14B 整条线重跑(SFT@2048 → DPO 纯 behaviour → 评估),用 48G 显存跑满 2048。judge 用 GPT-4 API(不占显卡,你本地跑,评 base/SFT/DPO 的 win rate)。
+- **换卡后执行计划(拿到 API key + 若换实例的新 ssh 信息)**:
+  - **step0 连接**:同实例换卡→`autodl-mpse` 直连(host/port/key 不变);换实例→更新 `~/.ssh/config` 的 HostName/Port(当前 `connect.westc.seetacloud.com:26757` / `id_ed25519`)+ 用密码或重加公钥;系统盘若丢 `tar xzf /root/autodl-tmp/yuanchat_backup.tar.gz -C /root/Yuan-chat`。
+  - **step1 judge 先验流程(快,先拿 7B 基线)**:`gen_for_judge.py`(服务器生成 base/sft/dpo 回复)→ scp 本地 → `gpt4_judge.py --pairs sft:dpo base:sft --model gpt-4o`(本地,openai SDK 2.46 已装,费用 <$1/轮)。key 放本地环境变量 `OPENAI_API_KEY`。
+  - **step2 14B 整条线(长,48G 跑满 2048)**:14B SFT@2048(顺带回答"14B 能否用 2048 上下文"——之前 32G OOM 没测成)→ `sample_candidates.py`(14B 候选池)→ `make_pairs_offline.py --terms ""`(**纯 behaviour**,消融结论:rel/len 都不进)→ `train_dpo.py` → 再 `gen_for_judge` 评 14B。
+  - judge 工具已推 GitHub(commit 3e2786e);费用预估 n=60 约 $0.35(单向)/$0.70(双向),全 491 约 $7。
 
 **★ 当前进度（2026-07-23，最新 —— compact 后先读这段 + §0.4 末尾的 ★★★/★ 块）**
 A 段评估器完成验证；**B 段生成器已收尾**,最终定版 `outputs/mm_sft/qwen7b_final`。
