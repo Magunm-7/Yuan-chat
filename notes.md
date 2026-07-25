@@ -26,6 +26,21 @@
 
 ## 0.2 B 段起步 handoff（compact / 新会话后直接照这个走）
 
+**★★★ 14B 结果（2026-07-26,换卡到 RTX 4090 48G 后 —— compact 后先读这段）**
+- **14B SFT @2048 成功**:`outputs/mm_sft/qwen14b_sft_2048`(lora_adapter + mm_prefix.pt),34:49,loss 1.69。**48G 扛住 2048 全程无 OOM → 回答了"14B 能否用 2048 上下文"= 能**(之前 32G OOM 没测成)。
+- **14B DPO(纯 behaviour)**:`outputs/dpo/qwen14b_dpo`,候选池 300→235 偏好对(`pairs_14b_behav.jsonl`),DPO 6min rc=0。⚠ **margin 全程在 0 附近震荡(±0.05)、loss 卡 0.69 → DPO 大概率没学充分**,数据量太小(235 对 vs 7B 全量 1608),和 relevance 消融(231 对 behaviour 也弱)一致。要 DPO 真起效需候选池扩到全量(几小时 14B 采样)。
+- **⏳ judge 待跑(卡住,恢复方法在此)**:`gen_for_judge`(14B base/sft/dpo)反复僵死(ssh 启动断+进程 fork 后没真跑,3MB/GPU0/log空),未拿到 win rate。**最稳用网页终端(JupyterLab)前台跑**:
+  1. 服务器网页终端:`cd /root/Yuan-chat && HF_HUB_OFFLINE=1 HF_HOME=/root/autodl-tmp/hf PYTHONPATH=src:scripts /root/autodl-tmp/envs/qwen3/bin/python scripts/gen_for_judge.py --base /root/autodl-tmp/models/Qwen3-14B --sft_lora outputs/mm_sft/qwen14b_sft_2048 --dpo_lora outputs/dpo/qwen14b_dpo --n 60 --out data/annomi/responses_14b.jsonl`(~20min,前台能看进度)
+  2. `scp autodl-mpse:/root/Yuan-chat/data/annomi/responses_14b.jsonl 本地`
+  3. 本地:`OPENAI_API_KEY=sk-... python scripts/gpt4_judge.py --responses responses_14b.jsonl --pairs sft:dpo base:sft --model gpt-4o`(gpt-4o key 已验证可用,openai SDK 本地已装,费用<$1)
+- **预期**:SFT>base 明显(微调有效);DPO vs SFT 大概率打平(数据量小 margin≈0)。这就是要的"base→SFT→DPO 独立 judge 提升曲线"。
+
+**★ 换卡教训（2026-07-26,4090 48G）**:
+- 换实例=全新空环境(系统盘+数据盘全空)。从本地备份 712M 解压恢复。**备份漏了两样"判断可重建"的**:hf 编码器缓存(whisper/clip/minilm,已重下)、qwen3 env(clone base+修坏pip+装依赖重建)。**下次备份要么包含、要么在此列明重建命令**,别靠临时判断。
+- **真正卡大半夜的是两个隐蔽外部问题(与代码/环境无关)**:①ssh 频繁断/`Connection reset`=跨境网络+AutoDL 限流→**重启实例**解决;②VSCode Remote 完全连不上=`~/.ssh/config` 有孤立 SID(`UNKNOWN\UNKNOWN`),Windows System32 ssh 严格拒绝读 config→`icacls "config" /inheritance:r /grant:r "用户:F"` + `/remove:g "*SID"` 修复(Git Bash ssh 权限宽松,所以命令行/我的工具能连、VSCode 不能)。
+- PowerShell profile 自动 `proxy-on`(Clash 7897)已注释——Clash 没运行时它把 http_proxy 指向死代理拖累 git/pip;但 **ssh 不读 http_proxy,不是 ssh 不稳主因**。
+- **nohup/setsid 启动 14B 长任务反复僵死**(3MB/GPU0):ssh 启动命令中途断→进程 fork 后没真跑。SFT 侥幸成功、gen_for_judge 反复中招。**教训:14B 这类要 GPU 的启动,优先网页终端前台跑,别赌 ssh nohup。**
+
 **★★ 备份与换卡恢复（2026-07-24 —— 明天 2025-07-25 换 48G 卡训 14B,换卡前先读这段）**
 - **全量产物备份包**:`yuanchat_backup.tar.gz`(712M)= outputs 关键产物(evaluator + qwen7b_v3_2048/final/final_v2 + qwen14b_final + dpo 全套) + data 所有 jsonl + mm_sft_final + feats + scripts + src + notes + concreteness.txt。
   - 服务器: `/root/autodl-tmp/yuanchat_backup.tar.gz`(数据盘,换实例能带走)
@@ -38,8 +53,8 @@
 - **服务器路径速查**:代码 `/root/Yuan-chat`;14B env `/root/autodl-tmp/envs/qwen3/bin/python`;7B 用 `/root/miniconda3/bin/python`;模型 `/root/autodl-tmp/models/`;词典 `/root/autodl-tmp/concreteness.txt`;HF 缓存 `/root/autodl-tmp/hf`;`ssh autodl-mpse`;启 demo `bash /root/start_demo.sh`。
 - **换卡后执行计划(拿到 API key + 若换实例的新 ssh 信息)**:
   - **step0 连接**:同实例换卡→`autodl-mpse` 直连(host/port/key 不变);换实例→更新 `~/.ssh/config` 的 HostName/Port(当前 `connect.westc.seetacloud.com:26757` / `id_ed25519`)+ 用密码或重加公钥;系统盘若丢 `tar xzf /root/autodl-tmp/yuanchat_backup.tar.gz -C /root/Yuan-chat`。
-  - **step1 judge 先验流程(快,先拿 7B 基线)**:`gen_for_judge.py`(服务器生成 base/sft/dpo 回复)→ scp 本地 → `gpt4_judge.py --pairs sft:dpo base:sft --model gpt-4o`(本地,openai SDK 2.46 已装,费用 <$1/轮)。key 放本地环境变量 `OPENAI_API_KEY`。
-  - **step2 14B 整条线(长,48G 跑满 2048)**:14B SFT@2048(顺带回答"14B 能否用 2048 上下文"——之前 32G OOM 没测成)→ `sample_candidates.py`(14B 候选池)→ `make_pairs_offline.py --terms ""`(**纯 behaviour**,消融结论:rel/len 都不进)→ `train_dpo.py` → 再 `gen_for_judge` 评 14B。
+  - **step1 14B 整条线(主线,长,48G 跑满 2048)**:14B SFT@2048(顺带回答"14B 能否用 2048 上下文"——之前 32G OOM 没测成)→ `sample_candidates.py`(14B 候选池)→ `make_pairs_offline.py --terms ""`(**纯 behaviour**,消融结论:rel/len 都不进 DPO)→ `train_dpo.py`。**7B 不做基线,最终指标只看 14B。**
+  - **step2 judge 评 14B**(14B 训好后):`gen_for_judge.py`(服务器生成 14B base/sft/dpo,`--base Qwen3-14B --sft_lora/--dpo_lora 换 14B 路径`)→ scp 本地 → `gpt4_judge.py --pairs sft:dpo base:sft --model gpt-4o`(本地,openai SDK 2.46 已装,费用 <$1/轮,key 放环境变量 `OPENAI_API_KEY`)。**训练空窗先用 3-5 条小样本 sanity-check judge 脚本(API 通/判决合理/A-B 位置没写反),再全量评。**
   - judge 工具已推 GitHub(commit 3e2786e);费用预估 n=60 约 $0.35(单向)/$0.70(双向),全 491 约 $7。
 
 **★ 当前进度（2026-07-23，最新 —— compact 后先读这段 + §0.4 末尾的 ★★★/★ 块）**
