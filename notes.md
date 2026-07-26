@@ -28,18 +28,32 @@
 
 **★★★ 14B 结果（2026-07-26,换卡到 RTX 4090 48G 后 —— compact 后先读这段）**
 - **14B SFT @2048 成功**:`outputs/mm_sft/qwen14b_sft_2048`(lora_adapter + mm_prefix.pt),34:49,loss 1.69。**48G 扛住 2048 全程无 OOM → 回答了"14B 能否用 2048 上下文"= 能**(之前 32G OOM 没测成)。
-- **14B DPO(纯 behaviour)**:`outputs/dpo/qwen14b_dpo`,候选池 300→235 偏好对(`pairs_14b_behav.jsonl`),DPO 6min rc=0。⚠ **margin 全程在 0 附近震荡(±0.05)、loss 卡 0.69 → DPO 大概率没学充分**,数据量太小(235 对 vs 7B 全量 1608),和 relevance 消融(231 对 behaviour 也弱)一致。要 DPO 真起效需候选池扩到全量(几小时 14B 采样)。
-- **⏳ judge 待跑(卡住,恢复方法在此)**:`gen_for_judge`(14B base/sft/dpo)反复僵死(ssh 启动断+进程 fork 后没真跑,3MB/GPU0/log空),未拿到 win rate。**最稳用网页终端(JupyterLab)前台跑**:
-  1. 服务器网页终端:`cd /root/Yuan-chat && HF_HUB_OFFLINE=1 HF_HOME=/root/autodl-tmp/hf PYTHONPATH=src:scripts /root/autodl-tmp/envs/qwen3/bin/python scripts/gen_for_judge.py --base /root/autodl-tmp/models/Qwen3-14B --sft_lora outputs/mm_sft/qwen14b_sft_2048 --dpo_lora outputs/dpo/qwen14b_dpo --n 60 --out data/annomi/responses_14b.jsonl`(~20min,前台能看进度)
-  2. `scp autodl-mpse:/root/Yuan-chat/data/annomi/responses_14b.jsonl 本地`
-  3. 本地:`OPENAI_API_KEY=sk-... python scripts/gpt4_judge.py --responses responses_14b.jsonl --pairs sft:dpo base:sft --model gpt-4o`(gpt-4o key 已验证可用,openai SDK 本地已装,费用<$1)
-- **预期**:SFT>base 明显(微调有效);DPO vs SFT 大概率打平(数据量小 margin≈0)。这就是要的"base→SFT→DPO 独立 judge 提升曲线"。
+- **14B DPO —— 两版对照(重要,能讲)**:
+  - ❌ **旧版 235 对**(`qwen14b_dpo`,候选池只采 `--n 300`):margin 全程 ±0.05、loss 卡 0.69 = **没学到**。根因不是模型/构造(确是 14B SFT 采的,demo 挂的 base+SFT 都是 14B),是**换卡当晚为省时间只采了 300 条 prompt**(全量 2433),经过滤→235 对,数据太少。
+  - ✅ **全量版 1856 对**(`qwen14b_dpo_full`,2026-07-26 重跑,候选池 `--n 2433`→有效采样 2252→纯 behaviour 造对 1856):margin **0→+17.27**、loss **0.69→0.38**,**明确学到偏好**。全自动 pipeline `/root/run_14b_full.sh`(采样~3h @11:39-14:34 + DPO~45min)。产物 `outputs/dpo/qwen14b_dpo_full`(adapter_model.safetensors 42M,结构同旧版)。旧 235 版保留作对照,没覆盖。
+  - **对照价值**:"235 对没学 vs 1856 对 margin+17" = 直接证明 DPO 对偏好数据量的敏感性,能写进简历/答辩的消融点。
+- **judge(2026-07-26 gen 已跑通)**:`gen_for_judge.py` 生成 base/SFT/`dpo_full` 三方回复(holdout n=60)→ `data/annomi/responses_14b.jsonl`,监控完成后自动 scp 到本地 `C:\Users\qmn20\Yuan-chat\data\annomi\`。启动法见换卡教训(setsid+不sleep,已破解僵死)。
+  - **只差最后一步(要用户给 OpenAI key)**:本地 `OPENAI_API_KEY=sk-... python scripts/gpt4_judge.py --responses data/annomi/responses_14b.jsonl --pairs sft:dpo base:sft --model gpt-4o`(openai SDK 本地已装,n=60 费用<$1;建议加 `--two_way` 抗位置偏差)。
+  - **★ gen 定性结果(2026-07-26,judge 前必读解读框架)**:60 条 holdout 单次 temp0.6 —— base avg **23.2词**(丰富但偏 general、偶尔 premature focus 给方向)、SFT avg **1.9词/55条"Mm-hmm"**、DPO avg **10.8词**(实质 reflection,43/60 带反映式追问,0说教)。
+    - **SFT 坍缩不是 bug/缺 prefix**:demo(带多模态 prefix)采样的 14577 候选也 **33% 超短**、behaviour 里 other(4518) 与 reflection(3902)/question(4122) 相当——SFT 忠实拟合了 AnnoMI 咨询师的最小反应众数("Mm-hmm/Yeah/Okay",gold 本身 26/60 超短),低温单采几乎必落这个众数。base 无 LoRA 走预训练分布所以丰富。
+    - **DPO 的真价值(核心卖点)**:behaviour reward(reflection 1.0 ≫ other 0.2)把概率质量从"最小反应(other)"**系统性迁移到"实质 reflection"**,margin+17 对应的就是这个迁移。**SFT→DPO 是真实、可量化的提升**(1.9→10.8词、Mm-hmm→MI reflection)。
+    - **修正预期**:base vs SFT 大概率 **base 胜**(低温暴露 SFT 众数,别误读成"微调有害");核心看 **DPO vs SFT(真提升)** 和 **DPO vs base(MI 对齐 vs 通用大模型)**。judge 建议 `--pairs base:sft sft:dpo base:dpo --two_way`。
+    - **故事线(能写简历/答辩)**:base(通用助手)→SFT(拟合数据、过度最小反应)→DPO(行为对齐、稳定 reflection),是**风格演化**而非单调质量上升,比"越训越好"更真实可信。
+
+  - **★★★ judge 最终结果(2026-07-26 完成,60 条 two_way gpt-4o,`data/annomi/judge_14b_full.jsonl`)**:
+    - `base vs sft`: **base 92%**(55) / sft 3%(2) / 平3 —— SFT 低温坍缩,base 完胜
+    - `sft vs dpo`: **dpo 77%**(46) / sft 12%(7) / 平7 —— ✅ **DPO 大幅净胜 SFT = 要的"RL>SFT 独立提升指标"(核心成果,能写简历的硬数字)**
+    - `base vs dpo`: **base 87%**(52) / dpo 5%(3) / 平5 —— base 仍完胜 DPO
+    - **排名 base > DPO > SFT**。诚实双结论:①DPO 相对 SFT 提升被独立尺子确认(77%),reward-shaping 方法论闭环成立;②但 SFT+DPO 整条链**未超越通用 base 大模型**。
+    - **根因(有讲头的负结果)**:SFT 用 AnnoMI(口语转写+咨询师大量最小反应)微调→学 MI 行为倾向但继承"寡言"、LoRA 1epoch 语言质量退化;DPO 只优化离散 behaviour、不优化语言丰富度/自然度→修好行为没修语言退化、还引入模板化("So you're feeling…"偶尔答非所问);base 无此数据污染,保留 14B 预训练全部语言能力且本身会 reflection/open question。呼应早期判断(B段"感知→生成耦合松、微调在生成质量收益有限")。
+    - **简历讲法**:主打"DPO vs SFT 77% 独立 win rate + 完整 reward 消融(只 behaviour 安全,length/rel 会 reward hacking)";如实报告 base 更强 + 根因诊断,显方法论深度与诚实,而非虚假 SOTA。若要真超 base:需更大/更干净的 SFT 语料,或在 DPO reward 里加语言质量项(但注意连续信号 reward hacking 风险)。
 
 **★ 换卡教训（2026-07-26,4090 48G）**:
 - 换实例=全新空环境(系统盘+数据盘全空)。从本地备份 712M 解压恢复。**备份漏了两样"判断可重建"的**:hf 编码器缓存(whisper/clip/minilm,已重下)、qwen3 env(clone base+修坏pip+装依赖重建)。**下次备份要么包含、要么在此列明重建命令**,别靠临时判断。
 - **真正卡大半夜的是两个隐蔽外部问题(与代码/环境无关)**:①ssh 频繁断/`Connection reset`=跨境网络+AutoDL 限流→**重启实例**解决;②VSCode Remote 完全连不上=`~/.ssh/config` 有孤立 SID(`UNKNOWN\UNKNOWN`),Windows System32 ssh 严格拒绝读 config→`icacls "config" /inheritance:r /grant:r "用户:F"` + `/remove:g "*SID"` 修复(Git Bash ssh 权限宽松,所以命令行/我的工具能连、VSCode 不能)。
 - PowerShell profile 自动 `proxy-on`(Clash 7897)已注释——Clash 没运行时它把 http_proxy 指向死代理拖累 git/pip;但 **ssh 不读 http_proxy,不是 ssh 不稳主因**。
-- **nohup/setsid 启动 14B 长任务反复僵死**(3MB/GPU0):ssh 启动命令中途断→进程 fork 后没真跑。SFT 侥幸成功、gen_for_judge 反复中招。**教训:14B 这类要 GPU 的启动,优先网页终端前台跑,别赌 ssh nohup。**
+- **~~nohup/setsid 反复僵死~~ 已破解(2026-07-26,推翻旧结论)**:真因不是 nohup,是**启动 ssh 命令里带 `sleep N` 挂着等确认,跨境网络在那几秒把会话掐断(exit 255)**→进程虽已被 setsid fork,但 ssh 返回错误让人误判"没起/僵死"。**正解:启动命令写 `setsid nohup bash x.sh >log 2>&1 </dev/null & echo OK`(秒返回、绝不 sleep),之后用独立短 ssh 查进程/日志/GPU 确认**。全量 pipeline(`run_14b_full.sh`)和 `gen_for_judge` 都靠这法子稳定跑通,无需网页终端。ssh 偶发 255 只是噪声,重试即可,不影响 setsid 已 detach 的任务。
+- **换卡备份又漏一样(2026-07-26)**:`scripts/gen_for_judge.py`(较晚写的脚本)不在备份包里,服务器恢复后缺失→gen 假成功(rc=0 但没生成)。已从本地 scp 补。**根治:备份清单要含 `scripts/*.py` 全部,别按"哪些重要"临时判断。**
 
 **★★ 备份与换卡恢复（2026-07-24 —— 明天 2025-07-25 换 48G 卡训 14B,换卡前先读这段）**
 - **全量产物备份包**:`yuanchat_backup.tar.gz`(712M)= outputs 关键产物(evaluator + qwen7b_v3_2048/final/final_v2 + qwen14b_final + dpo 全套) + data 所有 jsonl + mm_sft_final + feats + scripts + src + notes + concreteness.txt。
