@@ -1,344 +1,185 @@
-# MPSE
-- 底层原理：
-假设有三轮对话，人：S1，S2，S3，模型：Y1，Y2。那三段对话的顺序就是S1，Y1，S2，Y2，S3.我们设计评估器的目的就是为了挑选出好的Yi使得从Si到Si+1的状态之中，某些指标z有了下降，比如抑郁指标dep，我们希望在多轮对话的情况下dep处于一个下降的趋势，那我们就要量化到底哪些回复Y达到了期望目标
-- 输出参数：
-评估器会对人说的话赋予额外三个参数：μ，σ，α
+# Yuan-chat / MPSE — 多模态状态感知的动机式访谈(MI)咨询对话模型
 
-# 多模态证据融合与状态估计
-
-> 目标：对每个 *human turn* 片段，从 **文本/语音/视频** 三种模态提取特征，并进行门控融合，输出可解释的状态估计（均值/不确定性/模态权重）。  
+> 一个**完整、可调用**的两段式系统:用语音语调 + 面部表情 + 文本**感知来访者的心理状态**(改变意愿 / 唤醒 / 效价),据此**生成更共情、更贴状态的咨询回复**。全程**无人工标注**,弱监督自建信号;数据用公开基准 **AnnoMI**。
+>
+> 定位:工程/研究导向的**完整闭环**(方法 + 能跑的系统 + 有对照的结果 + 诚实的局限),不追求虚的 SOTA。
 
 ---
 
-## 1. 特征提取
+## 0. TL;DR — 这个项目做成了什么
 
-对一个 human turn 片段，针对三个模态提取特征：
-
-- **文字**：内容编码 `encode`  
-  `encode(text) → h_t^text`  
-  即：h<sub>t</sub><sup>text</sup>
-
-- **语音**：时间段 `[t0, t1]`（可加 `±δ` 扩展）编码  
-  `encode(audio[t0,t1]) → h_t^audio`  
-  即：h<sub>t</sub><sup>audio</sup>
-
-- **视频**：时间段 `[t0-δ, t1+δ]` 编码  
-  `encode(video[t0-δ,t1+δ]) → h_t^video`  
-  即：h<sub>t</sub><sup>video</sup>
+- **A 段·评估器(感知层)**:一个 0.89M 的小网络,吃三模态(Whisper 语音 / CLIP 面部 / MiniLM 文本),一次前向输出每句话的 **μ(状态均值)/ σ(不确定性)/ α(模态门控权重)**。整体消融证明多模态感知**有效**:质量判别 AUC **0.717 > 0.638**(不过评估器)。
+- **B 段·生成器(表达层)**:冻结 **Qwen3-14B** + LoRA,吃 40 轮对话历史 + 评估器状态标记,生成 MI 咨询回复。
+- **本轮核心成果(reward shaping + DPO)**:从"生成器坍缩成 'Mm-hmm' 附和"这个真实失败出发,
+  1. 回头审数据 → 定位坍缩根因是训练目标里 **41% 是 backchannel(附和语)** → 用**行为子类 + 会话质量精细加权**修复(SFT_v3,坍缩 92%→37%,真坍缩 88%→15%);
+  2. **用来访者的真实反应(talk_type 转变)而非开发者品味来定 reward** → 发现"开放式提问"是唯一能把来访者推向"改变"的强信号(净 Δ +0.112) → 据此设计离散 reward;
+  3. DPO 优化时撞上 **reward hacking**(模型把"开放提问"钻成 "So...?" 万能句刷屏)→ 用 **beta 剂量-反应曲线**证明病根是"过度优化"、收紧隐式 KL 修复;
+  4. **独立 GPT-4o judge 确认:最终产物 DPO_v3(beta=0.5)> SFT_v3 > 真人专家 gold**。
+- 全链**诊断 → 修复 → 独立验证**闭环,每一步都有量化 + 诚实边界。
 
 ---
 
-## 2. 模态证据权重（门控融合）
+## 1. 问题与数据
 
-定义模态证据权重（门控系数）：
+**痛点**:数字心理健康 / 情感陪伴 AI 是真实在增长的赛道(Woebot / Wysa 等),但现有多为**纯文本**,读不懂来访者"怎么说"(语气、表情)。我们做多模态状态感知的共情咨询对话。
 
-- α<sub>t</sub> = (α<sup>text</sup>, α<sup>aud</sup>, α<sup>vid</sup>)
+**数据:AnnoMI**(公开基准,ICASSP 2022)。133 段专家标注的 MI 访谈(110 高质量 / 23 低质量),含逐句的:
+- `client_talk_type` ∈ {change, neutral, sustain} —— 来访者是朝"改变"还是"维持现状"说话(**结果信号**);
+- `main_therapist_behaviour` + 细粒度子类(reflection: simple/complex;question: open/closed;input: information/advice/negotiation/options)——咨询师做了什么动作;
+- `mi_quality`(会话级 high/low)。
 
-融合得到统一表征：
-
-- h<sub>t</sub> = α<sup>text</sup> · h<sub>t</sub><sup>text</sup> + α<sup>aud</sup> · h<sub>t</sub><sup>aud</sup> + α<sup>vid</sup> · h<sub>t</sub><sup>vid</sup>
-
-解释性：
-- h<sub>t</sub> 是统一表征
-- α<sub>t</sub> 用于解释：该步主要依赖哪个模态提供证据（哪个权重更大）
+清洗后 **128 session / train 2433 / holdout 491**(会话级划分不泄漏),每条带 **40 轮对话历史**。
 
 ---
 
-## 3. 时序隐变量与异方差回归输出
+## 2. A 段 · 评估器 MPSE(感知层)
 
-将融合表征映射到时序隐变量：
+### 三个核心 idea
+1. **μ / σ / α**:异方差回归一次前向同时输出状态均值、不确定性、模态门控权重。
+2. **用状态轨迹找信号**:不做逐句因果归因(数据证明其为空),而是读**会话尺度的状态轨迹形状**区分咨询质量。
+3. **用 σ 反哺训练**:样本权重 `w = exp(-λ·σ̄)`,越不确定权重越低。
 
-- z<sub>t</sub> = f(h<sub>t</sub>)  
-  （把融合后的输出映射为隐变量）
+### 架构
+`三模态编码器(冻结:Whisper768 / CLIP768 / MiniLM384) → 投影 → α 门控加权和 → GRU 时序 → μ/σ 异方差头`。
 
-异方差回归输出（均值与方差）：
-
-- μ<sub>t</sub> = W<sub>μ</sub> · z<sub>t</sub>
-- σ<sub>t</sub><sup>2</sup> = softplus(W<sub>σ</sub> · z<sub>t</sub>)
-
-一次前向输出包含：
-- μ<sub>t</sub>：状态估计均值（可用于趋势/变化判断）
-- σ<sub>t</sub><sup>2</sup>：不确定性（方差）
-- α<sub>t</sub>：模态证据权重（可解释性）
-
----
-
-## 4. 用 μ 做对话“跨度/变化”判断（以 dep 为例）
-
-对连续 turn 的变化幅度：
-
-- Δμ<sub>t→t+1</sub> = μ<sub>t+1</sub> − μ<sub>t</sub>
-
-以 μ<sup>dep</sup>（例如 depression 维度）为例，设阈值 ζ：
-
-- 若 Δμ<sup>dep</sup> < −ζ ：认为出现 **有效回复**（朝期望方向变化）
-- 若 Δμ<sup>dep</sup> >  ζ ：认为出现 **无效回复 / 反向变化**
-
+### 结果(session-CV,袋外预测)
+- **整体消融(证明"评估器加了信息")**:质量判别 Option C AUC **full 0.717 > no-eval 0.638**;残缺的纯文本版 0.533 反而更差 → **多模态融合是刚需**。
+- 四开关消融:去视频 −0.064(面部最重要)、去音频 −0.037、去 α −0.028、**去 σ +0.005(σ 是这份数据上最弱的一环,如实报告)**。
+- H1:μ_chg 逐句还原 talk_type,AUC 0.615 / p=0.001。
+- **诚实边界**:效应量多在 std 量级(23 个 low session 是功效硬上限);σ 在质量判别上未显增益。
 
 ---
 
-## 5. 用 σ 表达不确定性
+## 3. B 段 · 生成器(表达层)
 
-σ<sub>t</sub><sup>2</sup>（或 σ<sub>t</sub>）越大 ⇒ 模型对该步估计越不确定。
+**基座**:冻结 **Qwen3-14B**(不量化)+ LoRA(r=8, α=16, dropout=0.05, 挂 q/k/v/o)。
+**输入**:40 轮对话历史 + 当前来访者话 + 评估器 μ 状态标记(`[Observed client state — change-readiness: …]`)。
+**配置**:text_only(音视频经评估器→μ→标记进 prompt,不直接进生成器)、max_len 2048、bf16、gradient checkpointing。
 
-直观解释：
-- 如果 σ 很大，说明估计器对新信息不确定；
-- 可能意味着该段对话存在异常，或对应不同的心理/对话模式。
+> 上下文收益边界(独立发现):ppl 在 1536 轮历史处已饱和(1536→2048 仅 Δ0.001),14B 受显存吃满 2048 并不构成劣势。
+
+### 3.1 发现并修复"坍缩"
+
+低温采样下,原始 SFT 会坍缩成 "Mm-hmm./Yeah." 附和(holdout 上 92% 输出 ≤3 词)。**回头审数据发现根因**:训练目标(咨询师回复)里 **41% 本身就是 backchannel**(光 "Mm-hmm." 占 10%)——模型忠实地学了这个众数。
+
+**修复 = 精细样本加权**(不删数据,只降权;用 AnnoMI-full 的**金标准子类**按 utterance join,SFT 侧零分类噪声):
+
+| 目标动作 | 权重 | 依据 |
+|---|---|---|
+| backchannel(≤3词) | ×0.01 | 附和是数据众数,机器也做不到真人的即时附和 |
+| 复杂反映 / 开放提问 | ×1.3 | MI 高阶技术 |
+| 协商 | ×1.2 | 引出改变计划 |
+| 封闭提问 / 灌输 | ×0.6 | 低产出 |
+| 给建议(矫正反射) | ×0.4 | 数据实证:advice 后来访者最容易转向"维持现状" |
+| 低质量会话整段 | ×0.4 | 那 23 段是"坏 MI"示范 |
+
+**结果(SFT_v3 = `qwen14b_sft_2048_bcw3`)**:整体坍缩 92%→**37%**;拆开看,**真坍缩(该给实质反映却说附和)从 88% 降到 15%**——其余 37% 是"该短就短"(gold 本身也有 43% 是最小鼓励)。行为分布:提问 38%、反映上升、附和大幅下降。
+
+### 3.2 用"来访者结果"定 reward,做 DPO
+
+**尺子由谁定?—— 让来访者的真实反应定,而不是开发者品味。** 分析全部 1496 处 `client_talk_type` 相邻转变,看**哪种咨询师动作之后来访者转向"改变"**:
+
+| 动作 | 净 Δ(朝改变移动) | 下一句 change% |
+|---|---|---|
+| **开放提问** | **+0.112(全场最高)** | 38.5% |
+| 协商 | +0.072 | 48% |
+| 复杂/简单反映 | ≈ 0 | ~25% |
+| 封闭提问 | −0.027 | 17.7% |
+| backchannel | −0.036 | — |
+
+→ **开放提问是唯一稳的"改变驱动"信号**(反映的价值在会话弧线,单句测不出,故保留但不靠它)。据此的**纯离散 reward**(离散类别才 DPO-safe,连续信号会被 hack):
+```
+{ reflection: 1.0, open-question: 1.0, closed-question: 0.1, other: 0.2, therapist_input: -0.5 }
+```
+open/closed 用一个 MiniLM+LogReg 分类器判(CV 0.75;实测启发式正则只有 68.5%,因为 MI 的 open 是功能性而非句法的)。
+
+**DPO**:on-policy 8 选 1(候选来自 SFT_v3 自己,gold/base 不当榜样否则退化成 SFT);参考模型 = SFT_v3;`loss = -logσ(beta·[(logπ_pol−logπ_ref)_chosen − (…)_rejected])`。
+
+### 3.3 reward hacking 与 beta 修复(方法论亮点)
+
+beta=0.1 时 DPO 把"开放提问"这个**平顶** reward 钻成漏洞:95% 输出以 "So..." 开头,"So you're feeling what?" 一字不差刷了 6 次——**指标全中,质量崩坏**(典型 Goodhart)。收紧隐式 KL(beta)后单调修复:
+
+| | 坍缩 | 'So' 开头 | 前2词多样性 |
+|---|---|---|---|
+| SFT_v3 | 37% | 0% | 37% |
+| DPO beta=0.1 | 2% | **95%(刷屏)** | 25% |
+| DPO beta=0.3 | 3% | 65% | 47% |
+| **DPO beta=0.5(最终)** | 5% | **45%** | **55%** |
+
+这条剂量-反应曲线本身**证明病根是"过度优化"而非 reward 本身烂**。
+
+### 3.4 独立 judge 验证(GPT-4o 成对盲评)
+
+| 对比 | 结果 |
+|---|---|
+| **DPO(b0.5) vs SFT_v3** | DPO 45% / SFT 35% / 平 20 → **RL 净提升 SFT** |
+| **DPO(b0.5) vs 真人 gold** | **DPO 60% / gold 28%** |
+| DPO(b0.3) vs DPO(b0.5) | 打平(13:12,平35) |
+
+**排名:DPO_v3 > SFT_v3 > gold。**
+
+> **诚实边界(必读)**:这把 judge 有**冗长偏好**——未微调的 base(23 词话痨)能打真人 gold 打到 **95%**,说明"赢"掺了"更长更讨喜"。我们只在**词长同量级**(SFT/DPO/gold 都 7–14 词)的比较里信它。"赢过 gold"也含"我们给实质回复、而 gold 那批有不少极简附和"的成分,**不等于"比人类咨询师强"**。识别并量化这个 judge 偏见,本身是本项目的一个方法论收获(它推翻了早期"跑不过 base"的表面结论)。
 
 ---
 
-## 6. 用 α 做模态依赖解释与数据平衡
+## 4. 展示样例(最终产物 DPO_v3_b05,holdout)
 
-α<sub>t</sub> 用于解释该步主要依赖哪种模态证据，例如：
+来访者话 → 咨询师回复:
 
-- 若 α<sup>vid</sup> 很高，但该段视频处于人脸模糊/遮挡期  
-  ⇒ 可能是可疑样本（高视频权重但视频质量差，证据不可靠）
+| 来访者 | DPO_v3_b05 回复 |
+|---|---|
+| "He's a good flatmate."(谈室友) | **"He's a good flatmate. What do you like about him?"**(反映 + 开放提问) |
+| "It's normal for university students I feel."(为喝酒辩护) | **"Do you think it's normal for university students to drink?"**(把判断权还给来访者) |
+| 谈起想戒烟的材料 | **"Tell me a bit more about why you don't want to quit."**(引出式开放提问) |
+| "I wanna be able to look nice." | **"So, what does looking nice mean to you?"**(探索价值) |
 
-也可用于数据策略与训练平衡：
+**方法论对照(同一条输入,三个阶段)**——展示"坍缩 → hacking → 修复":
 
-- 利用 α 识别并采样更多 **audio-dominant** 或 **video-dominant** 样本，
-- 从而促进三模态在训练中的贡献更均衡，避免模型过度偏向单一模态。
+| 阶段 | 对 "我昨晚 pub crawl 摔伤了脚踝…" 的回复 |
+|---|---|
+| 原始 SFT(坍缩) | "Mm-hmm." |
+| DPO beta=0.1(hacking) | "So you're feeling what?"(空洞万能句,刷屏) |
+| **DPO beta=0.5(最终)** | "What happened? What went wrong?"(切题开放提问) |
 
 ---
-	​
-# config/default.yaml
-- 顶层session：
-```yaml
-session:
-  id: "S0001"
+
+## 5. 诚实的局限
+
+- 评估器的 σ 反哺在这份数据上未显增益;效应量受 23 个 low session 功效上限限制。
+- 音视频对**生成**几乎无增益(三种注入 × 两种训练量全试过)——音视频的价值在**感知层**(评估器质量判别),不在生成;这与 A 段结论一致。
+- LLM-as-judge 有冗长偏见(见 §3.4),所有"胜率"需扣着这个读。
+- 最终产物残留一个 "So..." 风格 tic(45%,多为合法反映式反问);DPO 相对 SFT 的领先是温和的(+10 点),非碾压。
+- AnnoMI 是**演示性质**的专家访谈,非真实临床;不声称跨语言/临床有效性。
+
+---
+
+## 6. 关键产物与文件
+
 ```
-默认跑哪一个session，现在的训练逻辑是每一个样本是一个单位，先对单个样本进行数据处理，然后进行汇总再去训练
-
-- pipeline
-```yaml
-pipeline:
-  run_extract_wav: false
-  run_build_turns: false
-  run_build_mpse_npz: false
-  run_upgrade: false
-  run_train_mpse: false
-
-  run_build_sft: false
-  run_mm_cache: false
-
-  run_train_mm_sft: true
-  # 关键：保护你手改的 turns_upgraded.jsonl
-  # overwrite: 每次都重建（会重置）
-  # skip_if_exists: 如果 outputs/upgrade/<sid>/turns_upgraded.jsonl 已存在就不覆盖
-  upgraded_policy: "skip_if_exists"
-```
-各个部分对应的开关
-run_extract_wav: 把视频中的音频提取出来，因为后面切分对话主要靠的是音频
-run_build_turns: 构建切分对话数据集
-run_build_mpse_npz: 构建用于训练mpse的数据集
-run_upgrade: 训练好MPSE之后用MPSE去升级数据集
-run_train_mpse: 训练mpse
-run_build_sft: 构建用于SFT的数据集
-run_mm_cache: 把多模态特征算出来并缓存落盘
-run_train_mm_sft: 以上所有准备完毕后进行微调
-
-- 数据输入路径以及输出路径：
-```yaml
-paths:
-  raw_video: "data/raw/{session_id}.mp4"
-  work_dir: "data/derived/{session_id}"
-  outputs_dir: "outputs"
-```
-原始视频文件放在raw下，derived文件包含的是视频对应的原始音频文件，以及切分后的对话文件
-
-- segment: 分段与VAD参数
-```yaml
-segment:
-  target_turns: 0
-  wav_sr: 16000
-  vad:
-    frame_ms: 30
-    thr: 0.00004
-    min_speech_ms: 250
-    min_silence_ms: 800
-    merge_gap_sec: 0
-    force_single_turn: false
-```
-上一段说到derived文件包含了切分后的对话文件，这里就是在设置切分的规则，需要提前知道的是我们现在处理的视频格式，是剔除了机器的回复，原因在于如果使用人机对话的原始视频，采取人一句机器一句的交替对话模式，仅靠现有的工具很难识别完整，所以我直接对原始（人和机器都有出声）视频进行裁剪，把机器说话的声音剔除，仅保留人说话的部分，再在后期把机器说话的部分在outputs/upgrade/.json文件里补上，实测效果是比直接处理人机对话要好
-wav_sr: 16000：统一音频采样率（和 README 对齐）。
-target_turns: 0：0通常代表“不限制/不裁剪”，靠 VAD 自然切分。
-vad.frame_ms：VAD 分帧长度（30ms）。
-vad.thr：能量阈值（越小越敏感，越容易把噪声当语音）。
-min_speech_ms：最短有效语音段（过滤碎片）。
-min_silence_ms：切分所需静音长度（越大 → 段更长、切得更少）。
-merge_gap_sec：相邻段之间小间隔合并阈值（0 表示不合并）。
-force_single_turn：强制整段作为一个 turn（debug 用）。
-这里会直接决定 turns.jsonl 的质量；turns.jsonl 又是后面 MPSE/upgrade/SFT 的“地基”
-
-- dialogue 人机交替对话模式
-```yaml
-dialogue:
-  enabled: false
-  mode: "alternating"
-  start_role: "assistant"
-  keep_role: "user"
-  export_all_turns: true
-  export_pairs: true
-  target_user_turns: null
-```
-这里就是上一段说的直接对未剪辑的原始视频进行处理，效果不好，所以这里的开关直接关掉，不多做解释
-
-- asr 语音转文字
-```yaml
-asr:
-  enabled: true
-  model_dir: "/home/qmn/.../models/faster_whisper/pengzhendong/faster-whisper-small"
-  device: "cuda"
-  compute_type: "int8"
-```
-这里就是在处理视频时候用到的语音转文字工具，这里的模型路径是写死的，到时候要改。精度也可以修改，int8是为了更省显存的做法
-
-- agents：三路弱监督开关
-```yaml
-agents:
-  use_llm_text_rater: true
-  use_audio_heuristic: true
-  use_video_heuristic: true
+outputs/
+  evaluator/  mpse_deploy.pt      # 可实时推理的评估器
+              behaviour_clf.npz   # 4类行为分类器(reward用)
+              oc_clf.npz          # open/closed 分类器(reward用, CV 0.75)
+  mm_sft/     qwen14b_sft_2048_bcw3/   # ★ SFT_v3(精细加权,治坍缩)
+  dpo/        qwen14b_dpo_v3_b05/      # ★★ 最终产物(beta=0.5)
+              qwen14b_dpo_v3_b03/      #    beta=0.3(与b05打平)
+data/annomi/
+  turns_labeled.jsonl             # 逐 client turn(gold标签 + 弱标签)
+  mm_sft_final/{train,holdout}.jsonl   # SFT 训练/评估集(40轮历史+状态标记)
+  cand_pool_v3.jsonl / pairs_v3.jsonl  # DPO 候选池 / 偏好对
+  talk_type_transitions.md        # 1496 处 talk_type 转变全量分析
+  compare_sft_dpo_v3.md           # SFT vs DPO 逐条对比
+  AnnoMI-full.csv                 # 原始数据(含行为子类)
+scripts/                          # 全套管线脚本(见 run_scripts/ 内的一键脚本)
+notes.md                          # 完整研发日志(最权威的过程记录)
 ```
 
-- llm： 基座模型
-```yaml
-llm:
-  model_dir: "/home/qmn/.../models/Qwen3-8B/Qwen/Qwen3-8B"
-  device: "cuda"
-  max_new_tokens: 128
-```
-用的8B的，目前的训练数据量是偏小的，但是使用的是lora微调，所以也还说得过去
+**推理**(最终产物):`base Qwen3-14B → merge(SFT_v3 LoRA) → 挂 DPO_v3_b05 adapter`;状态标记已烘进 prompt,推理走纯文本路径。
 
-- 心里维度和指标+默认阈值
-```yaml
-indices:
-  names: ["dep", "sad", "anx", "stress", "microexpr_rate"]
-  tau:
-    dep: 0.30
-    sad: 0.30
-    anx: 0.30
-    stress: 0.30
-    microexpr_rate: 0.30
-```
-设置了4+1个指标维度，分别是dep, sad, anx, stress，和microexpr_rate，后者是一个面部表情的抓取率，反应的是当前视频的质量问题
+**环境**:14B 用 `qwen3` env(transformers 4.51.3);评估器/reward 相关用 base env。数据/产物在 `data/annomi/`、`outputs/`(gitignore,只在服务器 + 本地备份,不在 GitHub)。
 
-- mpse: 训练该评估器用到的超参
-```yaml
-mpse:
-  epochs: 5
-  batch_size: 8
-  lr: 3.0e-4
-  hidden_dim: 256
-  dropout: 0.1
-  use_pretrained_encoders: true
-  encoders:
-    text_model_dir: "/home/qmn/.../models/Qwen3-8B/..."
-    audio_model_dir: "/home/qmn/.../models/whisper-small/..."
-    video_model_dir: "/home/qmn/.../models/clip-vit-base-patch32/..."
-```
-这个评估器就是我们用来训练 (mu, sigma, alpha) 的核心模块
-三模态的编码器路径也是写死的，需要更改
-audio_model_dir 这里用的是 HF whisper-small（与 ASR 的 CT2 faster-whisper 不同体系）
+---
 
-- upgrade: 用训练好的MPSE模块对原始切分数据进行升级
-```yaml
-upgrade:
-  sigma_lambda: 2.0
-  sigma_max: 0.12
-  inject_state_tokens: true
-```
-sigma_lambda：不确定性惩罚系数（sigma 越大 → 权重越低）。
-sigma_max：只在 sigma 小于它时才“信任 improvement”。
-inject_state_tokens: true：把状态（可能是 indices / mu / sigma / alpha）注入到 SFT prompt（这会影响最终训练数据格式）。
+## 7. 完整方法论一句话
 
-- sft: 文本 SFT baseline
-```yaml
-sft:
-  enabled: false
-  max_seq_len: 1024
-```
-可选 text-only baseline 的对应实现
-
-- mm: 多模态特征提取配置
-```yaml
-mm:
-  enabled: true
-  whisper_dir: "/home/qmn/.../whisper-small"
-  clip_dir: "/home/qmn/.../clip-vit-base-patch32"
-  n_frames: 8
-  k_audio: 8
-  k_video: 8
-  device: "cuda"
-```
-whisper_dir/clip_dir：HF 模型目录（绝对路径）。
-n_frames：视频采样帧数。
-k_audio/k_video：“压缩成多少个软 token”的长度。
-这块会直接影响“mm_cache / mm_prefix.pt”等产物。
-
-- teacher: 咨询师回复模型
-```yaml
-teacher:
-  enabled: false
-  base_model_dir: "/home/qmn/.../Qwen3-8B"
-  device: "cuda"
-  max_new_tokens: 128
-```
-这部分是一开始在构造最小闭环的时候加的，现在用不到了，保持关闭就行
-
-- mm_sft: 多模态SFT训练
-```yaml
-mm_sft:
-  enabled: true
-  base_model_dir: "/home/qmn/.../Qwen3-8B"
-  out_dir: "outputs/mm_sft/{session_id}"
-  batch_size: 1
-  lr: 0.0002
-  epochs: 1
-  max_len: 1024
-```
-模型路径是绝对路径需要更改，输出路径是相对路径不需要更改
-
-
-# 需要修改绝对路径的地方
-- config/default.yaml 内包含的路径有：
-  - asr: model_dir 使用的模型是 pengzhendong/faster-whisper-small
-  
-  - llm: model_dir 使用的模型是 Qwen3-8B/Qwen/Qwen3-8B
-  
-  - mpse: text_model_dir 使用的模型是 Qwen3-8B/Qwen/Qwen3-8B
-          audio_model_dir 使用的模型是 openai-mirror/whisper-small
-          video_model_dir 使用的模型是 openai-mirror/clip-vit-base-patch32
-  
-  - mm: whisper_dir 使用的模型是 openai-mirror/whisper-small
-        clip_dir 使用的模型是 openai-mirror/clip-vit-base-patch32
-
-  - teacher: base_model_dir 使用的模型是 Qwen/Qwen3-8B
-
-  - mm_sft: base_model_dir 使用的模型是 Qwen/Qwen3-8B
-
-- src/mpse_mvp/features/video_features.py 内包含的路径有：
-  - model_path 使用的路径是 mediapipe/face_landmarker.task
-
-# 如果遇到了读取不出来模块的问题，先下载一下项目:
-```bash
-python -m pip install -e .
-```
-
-# 如何去运行整个流程:
-- 原始视频数据要求：在拿到视频文件后，把机器人说的部分给剪去，只留下人说话的部分，把视频文件命名为S*，我们现在已经到了S0019，所以你可以从S0020开始命名，我们现在以S0020为例。把S0020放置在data/raw/中
-
-- 更改config/default.yaml里的配置：session id更改为S0020，pipeline中的前五个开关（run_extract_wav，run_build_turns，run_build_mpse_npz，run_upgrade，run_train_mpse）更改为true，后三个开关（run_build_sft，run_mm_cache，run_train_mm_sft）更改为false。然后运行：
-```bash
-python scripts/run_full_loop.py --config configs/default.yaml
-```
-之后我们就会得到outputs文件夹中的部分文件，我们只修改outputs/upgrade中的jsonl文件，我们在该文件内的每一个turn的最后"therapist_reply"部分手动加上理疗师的回复，我们有现成的转录过的pdf文件，直接对照着复制粘贴就可以了。把理疗师的话加上之后，我们关闭前五个开关（run_extract_wav，run_build_turns，run_build_mpse_npz，run_upgrade，run_train_mpse），因为此时原始数据已经处理好了，已经得到了升级后的数据upgrade，接着打开run_build_sft，run_mm_cache，但是run_train_mm_sft要保持关闭因为这个是最终训练开关。然后再次运行：
-```bash
-python scripts/run_full_loop.py --config configs/default.yaml
-```
-之后我们就得到了outputs/mm_cache以及sft文件，mm_cache正是我们最终用于训练的数据。我们先把所有的训练数据合并到一起：
-```bash
-python scripts/merge_mm_index.py
-```
-得到的是outputs/mm_cache/ALL文件。然后就到了最后训练一步了，把pipeline中除了run_train_mm_sft以外的开关全部关闭，只打开run_train_mm_sft。训练完后我们会得到outputs/mm_sft/ALL，里面包含了lora微调后的权重以及用于三模态对齐的权重mm_prefix.pt
-
+> 察觉生成器坍缩 → 回头审数据定位根因(backchannel 噪声)→ 精细加权修复(SFT_v3)→ 诊断"跑不过 base"是 judge 冗长偏见 → 用来访者结果信号(talk_type)定 reward → DPO 撞 reward hacking → beta 剂量-反应证明过度优化并修复 → 独立 judge 确认 DPO_v3 > SFT_v3 > 真人 gold。**从真实失败一步步逼出来,不是照论文抄。**

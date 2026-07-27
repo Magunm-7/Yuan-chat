@@ -26,6 +26,70 @@
 
 ## 0.2 B 段起步 handoff（compact / 新会话后直接照这个走）
 
+**★★★ 回头看数据 + backchannel 降权 trial（2026-07-26 晚,进行中 —— compact 后先读这段）**
+起因:最终产物跑不过 base(见下面 judge 块),回头审原始数据 `AnnoMI-full.csv`(已 scp 到服务器 `data/annomi/`)。
+- **纠正一个记忆错位**:full vs simple **不是"只去重"**。真相:①去重(full 13551 行 = 9271 单标 + 428 句×10 一致性子集折叠成 simple 9699);②full 多 5 列 = `annotator_id` + 3×2 行为子类(`reflection_subtype` simple/complex、`question_subtype` open/closed、`therapist_input_subtype`)。**训练自始至终只用 simple**(唯一 CSV 加载器 `data/annomi.py` 默认 simple;全代码库零处读 subtype;产物零重复痕迹,四重验证)。→ **full 的细粒度子类一次都没进过训练。**
+- **★ 诊断(烟雾测试,基于现有产物)**:
+  - **SFT 坍缩根因 = 训练目标里 41% 是 backchannel**(reply_behaviour=="other" 或 ≤3 词;光 "Mm-hmm." 就占 10%、前4高频 22%)。低温 SFT 塌到这个众数。ST1b 证实:gold 是**实质回复**的场合 SFT 仍 **88% 坍缩成 ≤3 词**(base/dpo 0%)→ 是被 backchannel 目标带偏,不是模型能力。
+  - **base 赢 DPO 的 MI 层面解释**:base 开放提问 76%(26/34)、DPO 开放提问仅 2%(几乎全是 "So you're feeling X?" 模板化**封闭反问**)。4 类 reward 把两者都算 "question",看不见这个差别。
+  - **子类可分性(生死闸,MiniLM+LogReg 会话CV)**:open/closed **0.75 可靠**;simple/complex 反映**仅 0.62**(基线0.54)。B1 gold 里最能分质量的恰是 complex 反映密度(high 15% vs low 3.2%,~5x),**但它最难可靠分类** → **子类做 DPO reward 风险高(信号噪→DPO 放大→重蹈 v1/v2 reward hacking),不建议直接上;full 更适合当"诊断透镜 + 讲故事"**。
+- **★ 决定(用户拍板)**:**backchannel 大幅降权、不删;用 simple 造数据**。理由(有原理、能写方法):人机对话机器必须听完再回,做不到真人即时附和,附和本就不是机器该主推的模式。
+- **★ 进行中**:重加权脚本 `/root/reweight_backchannel.py`(只改 sample_weight:backchannel×0.1 再归一化)→ `data/annomi/mm_sft_final/train_bcw.jsonl`。效果:backchannel 梯度质量占比 **40%→6%**、实质 60%→94%、N_eff 2404→1626(健康)。**正在复训 14B SFT**:`/root/run_sft_bcw.sh` → `outputs/mm_sft/qwen14b_sft_2048_bcw`,配置与 qwen14b_sft_2048 **完全一致**(Qwen3-14B/max_len2048/text_only/no_aux_mu/grad_ckpt/r8α16),**只换数据**。评估脚本 `/root/eval_bcw.py`(同 60 holdout 生成,对比旧 SFT)。
+- **★ 结果(2026-07-26 18:53 训完 rc=0/35min,loss 末 3.01 vs 旧 1.69=在学难样本;eval 完)**:坍缩率(≤3词)**92%→78%**、平均词长 1.9→3.7、行为 other 93%→80%(question 2%→8%)。**方向对但偏弱**,仅救回约 1/5 原坍缩样本,78% 仍坍缩,不是"治好"。
+- **★★ 关键定性(比数字重要)**:救回的非坍缩输出仍是 `"So [复述]"` 模板化封闭反映、且**出现捏造**(凭空 "wearing high heels")——**正是当初 DPO 输给 base 的同一病**(封闭模板+捏造)。→ backchannel 降权治标(SFT 少说 Mm-hmm),**没触及 base>DPO 真因**=语言丰富度+开放提问+不捏造,这是 **AnnoMI 数据天花板**(转写寡言+"So"反映风格,SFT 忠实学了)。产物 `outputs/mm_sft/qwen14b_sft_2048_bcw` + `data/annomi/responses_14b_bcw.jsonl` 保留。
+- **决定(用户)**:不急、一点点调。**下次实验 bc_weight=0.02**(继续下调,拿 0.1→0.02→硬删 的坍缩消融曲线)。当前任务:**通读全表对话,定更细的加/降权方案**(不止"超短→降",要分出哪些实质回复该加权/该降权)——见下。
+- (备选路线②:收敛到诚实诊断故事,full 子类诊断 base>DPO 已成立。数据天花板不是权重能突破的,但用户选择先把权重杠杆调细、探更多信号。)
+- **★ 读全表结论(2026-07-26,通读 3 整段 high/low + 分层量化 next-turn)**:**好 MI = 开放提问(下一句 change 37%,全场最高常见动作)+ 复杂反映 + 协商(negotiation change 47%)引出动机**;**坏 MI = 封闭盘问(change 仅 17%)+ 建议/灌输(advice 后 sustain 全场最高 17.6% = 矫正反射反噬,数据自证)**。低质量会话整段是坏 MI 示范(Session 17:盘问+说教,客户全程不动)。caveat:next-turn 是弱信号(F1),判断=数字+MI理论+读样例三者交叉。
+- **★ 精细加权方案(v2)**:在 sigma 权重上乘,多动作叠乘后 clip[0.05,1.5]:backchannel(≤3词)×**0.02**、Q:open/REFL:complex ×1.3、INPUT:negotiation ×1.2、options ×1.1、REFL:simple ×1.0、Q:closed/INPUT:information ×0.6、long-other ×0.5、INPUT:advice ×0.4;**低质量会话整段 ×0.4**。**关键:子类用 full 金标准按 (session,utterance) join,SFT 加权侧零分类噪声**(区别于 DPO reward 侧的 0.62 噪声)。脚本 `/root/reweight_v2.py`。
+- **★ v2 训练(进行中,2026-07-26 晚)**:`train_bcw2.jsonl`(升权动作占梯度质量 60%/降 22%,N_eff 2404→1350;抽查最高权=自主支持+开放提问,最低权=说教/statin 指令,对得上)。`/root/run_sft_bcw2.sh`→`outputs/mm_sft/qwen14b_sft_2048_bcw2`,配置同 qwen14b_sft_2048 只换数据。
+- **★★ v2 结果(2026-07-26 20:02 训完,eval 完)——大改善**:坍缩率(≤3词)旧 **92%→v1(bc0.1)78%→v2 37%**;平均词长 1.9→3.7→**12.8(≈gold 14.2)**;行为 other 93%→40%、question 2%→**33%**、reflection 5%→17%。**精细加权把坍缩基本治住,行为分布往升权方向走,证明读表方案有效**。产物 `qwen14b_sft_2048_bcw2` + `data/annomi/responses_14b_bcw2.jsonl`。
+- **★★ "37% 坍缩"要拆开看(2026-07-26,重要)**:gold 真人自己 43%(26/60)也是超短(MI 正当技术:客户自述时给最小鼓励)。按 gold 长度拆:**gold 实质的上下文 v2 只坍缩 15%(5/34,旧 88%);gold 超短的上下文 v2 短 65%=该短就短**。→ **真正病态坍缩只剩 ~8%(5/60)**,其余是正确模仿 gold 的最小鼓励。v2 整体短率 37%≈gold 43%,**学会了"何时该简短"**。**不该追坍缩率到 0**(那会变话痨、违背 gold)。残留 5 条=低温安全默认+1epoch轻改+bc非清零。小瑕疵:v2 简短回复清一色 "Mm-hmm",gold 会换 Okay/Yeah/Uh-huh。
+- **★ 残留问题(诚实)**:非坍缩输出里仍有 "So [复述]" 模板 + **捏造**(如凭空 "wearing stilettos")。加权降了附和、抬了实质,但没根治捏造(需 DPO reward 里加 faithfulness,notes §0.4 末有 faithfulness.py)。也有真变好的(如 "I'm curious about what that looks like for you and your life" = 开放探索,非模板)。
+- **★ 反框(重要)**:v2 现在是 **gold 风格(简洁 12.8 词 + 多提问反映)**,不是 base 的话痨丰富(23.2 词)。gold 真人专家本就简洁(14.2 词)→ 之前"base 完胜"部分是 judge 偏好冗长丰富;**用 gold-风格的 v2 重新做 judge(base/gold/v2)可能大不一样**。待定下一步:①DPO on v2(需 faithfulness reward 治捏造)②直接 judge v2-SFT vs base vs gold 量化。
+- **★ v3 训练(进行中,2026-07-26 20:27 起,ETA ~70min)**:用户拍板继续调——**backchannel 0.02→0.01、epochs 1→2、lr 2e-4→1e-4(减半)**,其余同 v2。数据 `train_bcw3.jsonl`(N_eff 1335),`/root/run_sft_bcw3.sh`→`qwen14b_sft_2048_bcw3`(69min/2ep,loss末3.57)。
+- **★★ v3 结果(2026-07-26 21:37,eval完)——同 37% 但底下大不同**:整体短率同 22/60;**真坍缩 15%(v2)→18%(v3),没降=噪声**;**"So[复述]"模板率 13%→0%(清零!)**;词长 12.8→8.8;行为 reflection 17%→7%、question 33%→**38%**。产物 `responses_14b_bcw3.jsonl`。
+  - **★ 收获**:v3 把 "So+复述+捏造" 模板清零(那正是输 base 的病)。实质输出变开放好奇提问("why is that""I'm curious about what you like about vodka")——**提问不复述→结构上绕开捏造**。主因应是 **lr 减半**(温和拟合不死抠模板)。
+  - **★ 到头的杠杆**:真坍缩 ~15% **没被 bc0.01/2ep/lr减半 撼动=解码地板**(低温退回 Mm-hmm),不是数据权重能治,别再往这方向调 bc_weight。
+  - **★ 取舍(需权衡)**:v3 提问导向(Q38%/refl 7%,gold高质量约28%),用"少反映"换"不捏造"。v2 更均衡但13%捏造;v3 更安全但偏提问(所幸是开放好奇型非盘问)。**v2 vs v3 无完胜**。
+  - **下一步**:①judge(base/gold/v2/v3)量化;②DPO(v3 已解决捏造→faithfulness reward 可轻)。
+
+**★★★ 过夜自主推进：talk_type→reward + v3 DPO（2026-07-27 00:05 起,用户睡前授权,compact 后先读这段）**
+- **结论链回顾**:judge(100条two-way)证 base 靠冗长偏见赢(base 打真人 gold 95%);**v2/v3 都打平或略胜 gold=达人类专家水平**;用户读 compare_judge100.md 后拍板 **v3 明显更好**。→ 进 DPO。
+- **reward 定尺子的原理(拍板)**:on-policy 8选1(候选来自模型自己),gold/base 不当榜样(否则退化成SFT/被冗长带偏)。**尺子由"来访者结果"定**:talk_type 相邻转变分析(全量1496处,`data/annomi/talk_type_transitions.md`)——**唯一强信号=开放提问**(净Δ+0.112全场最高,→change38.5%,↑vs↓ +11.2);封闭(-0.027)/backchannel(-0.036)负;**反映单句无效应(≈0,坐实F1)但保留(会话弧线价值)**。
+- **reward 方案**:把 flat `question:0.6` 拆成 **open≈1.0 / closed≈0.1**(数值方向由 talk_type 背书),只用 talk_type 定这一项,其余(reflection 1.0/other 0.2/input -0.5)靠 MI 理论。防 hacking:open 分要门控(别只看 What 开头)。
+- **过夜并行任务**:①**v3 采新池子**(demo挂bcw3→sample 2433,~3h,`/root/run_sample_v3.sh`→`cand_pool_v3.jsonl`,监视器 bvva41rcl);②旧池子(`cand_pool_14b_full`,本地)上**调 reward 尺子 + 测 heuristic vs 充分训练分类器**(用户担心正则太机械、且之前分类器只是冻结线性探针没充分训练)。**尺子明显好→直接在v3池子跑make_pairs→训DPO→eval→分析(一条龙);模棱两可则停在分析留用户定**。及时落盘。
+- **★ 检测器定案(2026-07-27 凌晨,已验)**:open/closed heuristic 只 **68.5%**(正则太机械,MI 的 open 是功能性:反映式反问/嵌入式开放句/无问号祈使,正则抓不到,open召回仅58%)。分类器:LogReg 冻结MiniLM **0.750**,**MLP/加深不升反降(0.73)→ 天花板在冻结特征+标签噪声,不在容量;更充分训练无用,除非微调编码器(要GPU,未做)**。simple/complex 各法都 0.62(太噪,不进reward)。**定:open/closed 用 LogReg 0.75;reward 纯离散 {reflection 1.0, q_open 1.0, q_closed 0.1, other 0.2, therapist_input -0.5}**(open与reflection并列,不过度推向盘问)。
+- **★ reward逻辑已验**:旧池子上 新reward vs 旧,chosen里 q_open 7%→21%(heuristic)、**用真分类器 make_pairs_v3 更好: chosen q_open 达 38%**、rejected=附和+说教。样例干净。逻辑成立。
+- **★ 全自动过夜链(01:00起,无人值守)**:①`sample_v3.log` 采 v3 池子(~4h,ETA≈04:00-04:30,10条/分);②`/root/watch_and_dpo.sh` watcher 等池子采完→自动跑 `/root/run_dpo_v3.sh`=**make_pairs_v3(纯离散reward+oc_clf)→train_dpo(base+merge v3 SFT+新DPO adapter)→eval_dpo_v3(60holdout对比 SFT_v3)**,日志 `dpo_v3_pipe.log`。监视器 begao3szy 盯全链完成。
+  - **产物**:`outputs/evaluator/oc_clf.npz`、`data/annomi/{cand_pool_v3,pairs_v3,responses_dpo_v3}.jsonl`、`outputs/dpo/qwen14b_dpo_v3`。脚本 `/root/{make_pairs_v3,train_oc_clf,eval_dpo_v3}.py` + `run_dpo_v3.sh`。
+  - **DPO配置**:base Qwen3-14B + merge(qwen14b_sft_2048_bcw3) + 新DPO LoRA;beta0.1/lr5e-6/1ep/max_len1024(同qwen14b_dpo_full)。
+  - **早上看什么**:`dpo_v3_pipe.log` 尾部(make_pairs分布该是 chosen=q_open+reflection、rejected=附和/说教;DPO margin>0 表示学到;eval 里 DPO_v3 vs SFT_v3 的坍缩/开放问率/behaviour)。判据:DPO 后开放提问率↑、坍缩不回升、无捏造回潮=成功。
+  - **风险/兜底**:reward 已验故低风险;若 make_pairs 分布异常或 DPO margin≈0,则尺子在 v3 池子上不奏效,停在此留用户定(别再自动加码)。ssh偶断重试即可。
+- **★★ v3 DPO 结果(2026-07-27 03:54 完成)—— 指标大胜但 REWARD 被 HACK,负面结果**:
+  - 内部正常:make_pairs 1782对(分差1.28,chosen=reflection1078+q_open684,rejected=input1246+other536);**DPO margin 0.02→+8.30、loss 0.69→0.44,强力学到**。
+  - eval(60holdout)指标全中:**坍缩 37%→2%、backchannel 38%→0、说教 17%→0、提问 38%→70%、reflection 7%→30%、100%开放**。
+  - **★ 但定性=reward hacking**:DPO_v3 **95% 以 "So..." 开头**(SFT_v3=0%),**"So you're feeling what?" 一字不差重复6次**,大量空洞/clipped/无视上下文的万能开放问。多样性 37%→25%。margin 轨迹:前500步≈0、后500步暴冲+8.3=**后半程发现并榨取 hack**。
+  - **诊断**:离散"开放提问"reward 只判"是不是开放问",不判好/重复/切题 → DPO 坍缩到"So+万能开放问"这个最省力满分点。**又一个"选择场景reward≠优化场景reward"实例**(同 length/rel 老剧本)。**指标胜、质量输**:SFT_v3 提问自然多样切题,DPO_v3 是 "So...?" 刷屏。
+  - **结论**:此 reward 配置不行,按闸门停(明确hack非模棱两可)。**当前最好产物仍是 SFT_v3(qwen14b_sft_2048_bcw3)**;DPO_v3 是干净负面对照+可写进方法论的 hacking 实例。产物 `outputs/dpo/qwen14b_dpo_v3`、`responses_dpo_v3.jsonl` 保留。
+  - **待用户定的修法(我没动)**:①**收紧 beta 0.1→0.3-0.5**(margin+8.3=漂太远,更紧KL拴住SFT_v3,最省事最可能有效);②早停(margin≈+1约step550);③reward加多样性/质量维度(连续项难,易再hack)。
+- **★★★ beta=0.3 修复成功(2026-07-27 16:59)——诊断证实,hacking 治住了**:`outputs/dpo/qwen14b_dpo_v3_b03` + `responses_dpo_v3_b03.jsonl`。对比:'So'开头 b0.1 95%→**b0.3 65%**;前2词多样性 25%→**47%(超过SFT_v3的37%)**;最高频完全重复 "So you're feeling what?"×6 → ×1(不再刷屏)。metrics 保持:坍缩37%→**3%**、other 38%→0、说教17%→5%、反映7%→**33%**、提问62%全开放。读60条=多样切题的开放问+反映(#35 "He's a good flatmate. What do you like about him?" 等)。**证实病根=过度优化(非reward本身烂),收紧隐式KL修复。残留:65% "So" 风格tic(多为合法反映式反问),非空洞刷屏。**
+  - **★ 方法论线(可写简历)**:察觉reward hacking→判定过度优化→收紧beta修复,变量/重复量化验证。DPO_v3_b03 = 目前最好产物(同时优于SFT_v3修坍缩 + 优于b0.1躲hacking)。
+  - **★★ judge 确认(2026-07-27,60条two_way gpt-4o,`judge_dpo_b03.jsonl`)**:**排名 DPO_b03 > SFT_v3 > gold**。dpo_b03 vs sft_v3 = 27:23(平10,去平54%胜=**RL净提升SFT**);gold vs dpo_b03 = **dpo 34(57%)** vs 20;gold vs sft_v3 = sft 22 vs 17(平21)。诚实:judge 有冗长/实质偏好(base打gold 95%),此处三方词长7-14同量级偏见小,但"赢gold"含"我们给实质vs gold多极简附和"成分,非"胜过人类咨询师"。
+- **★★★ beta 扫描收敛 = 最终结果(2026-07-27 傍晚)**:剂量-反应曲线(同reward同偏好对,只调KL):
+
+  | | 坍缩 | 'So'开头 | 前2词多样性 |
+  |---|---|---|---|
+  | SFT_v3 | 37% | 0% | 37% |
+  | DPO b0.1 | 2% | 95%(刷屏) | 25% |
+  | DPO b0.3 | 3% | 65% | 47% |
+  | **DPO b0.5** | 5% | **45%** | **55%** |
+
+  - **单调:beta越紧→hacking越少、多样性越高,坍缩缓爬(2→3→5%)。甜区0.3-0.5,不必试0.7。** 这条曲线本身证明"病根=过度优化非reward烂",是可写答辩的硬论证。
+  - **b05 judge(`judge_b05.jsonl`)**:**b03≈b05(13:12,平35,分不出)**;b05 vs gold **36(60%)** vs 17;b05 vs sft_v3 **27(45%)** vs 21。→ b03/b05 质量相当、都稳赢SFT_v3和gold;b05客观风格更好(多样性55%、So tic更轻)。
+  - **★ 最终产物 = `outputs/dpo/qwen14b_dpo_v3_b05`(beta=0.5)**(或b03,wash)。responses `responses_dpo_v3_b0{3,5}.jsonl`。**完整链:数据重加权治坍缩(SFT_v3)→ talk_type结果信号定reward(开放提问,oc_clf 0.75)→ DPO撞hacking→beta剂量-反应诊断过度优化并修复→独立judge确认 DPO_v3 > SFT_v3 > gold。诊断-修复-验证闭环,每步量化+诚实边界。**
+  - **可写简历/答辩的硬点**:①识别并量化 LLM-judge 冗长偏见(base打真人gold 95%),推翻"跑不过base"的表面结论;②用来访者结果(talk_type)而非开发者品味定reward;③reward hacking 的剂量-反应诊断与修复;④最终产物独立 judge 胜真人专家 gold(诚实注明含附和成分)。
+- **本地修复**:项目 `data/annomi/AnnoMI-full.csv` 曾被弄坏(4.57MB乱码),已从服务器干净副本恢复(3.80MB/13551行)。
+
 **★★★ 14B 结果（2026-07-26,换卡到 RTX 4090 48G 后 —— compact 后先读这段）**
 - **14B SFT @2048 成功**:`outputs/mm_sft/qwen14b_sft_2048`(lora_adapter + mm_prefix.pt),34:49,loss 1.69。**48G 扛住 2048 全程无 OOM → 回答了"14B 能否用 2048 上下文"= 能**(之前 32G OOM 没测成)。
 - **14B DPO —— 两版对照(重要,能讲)**:
@@ -494,27 +558,58 @@ A 段评估器完成验证；**B 段生成器已收尾**,最终定版 `outputs/m
 
 > **2026-07-22 代码清理**：旧的逐 session MVP loop **全删（~23 文件）**——`scripts/{run_full_loop,run_all,merge_mm_index,label_aro_val}`、`src/mpse_mvp/` 下 `asr`/`encoders`/`pipeline`/`sft`/`supervision`/`upgrade` 整包 + `segment/{vad,diarize,extract_audio}` + `features/video_features` + `mm/cache_builder` + `mpse/{model,train}` + `utils.py`、`configs/default.yaml`。这些只被旧编排器串起来，跟 live 管线零交集；删后 import 冒烟已过。README 还引用它们，待重写。
 
-### 关键超参
-- ~~`indices.names = [dep,sad,anx,stress,microexpr_rate]`~~ → **AnnoMI 版维度是 chg / aro / val**
-- `mm.n_frames = 8`，`k_audio = k_video = 8`
-- `mm_sft: bs=1, lr=2e-4, epochs=1, max_len=512`；LoRA r=8, alpha=16, dropout=0.05
+### 关键超参(当前定版)
+- AnnoMI 版状态维度 = **chg / aro / val**(旧的 dep/sad/anx/stress/microexpr 已废)
+- 评估器:GRU + sigmoid α 门控 + 异方差 σ 头;三模态 Whisper768/CLIP768/MiniLM384(冻结)
+- 生成器 SFT:LoRA r=8/α=16/dropout=0.05(q/k/v/o);**14B 定版 bs=1,lr=2e-4,1ep,max_len=2048,40轮历史,text_only**
+- DPO:beta=**0.5**(定版)/lr=5e-6/1ep;reward 纯离散 {reflection 1.0, q_open 1.0, q_closed 0.1, other 0.2, therapist_input -0.5}
 
-### ★ AnnoMI 评估管线（当前实际在用的代码）
-```
-src/mpse_mvp/data/annomi.py       AnnoMI CSV → turns_client.jsonl + manifest（清洗:丢<2s / 时间戳倒序）
-scripts/
-  label_chg_zeroshot.py           chg 弱标签: bart-large-mnli zero-shot（AUC 0.667 vs gold）
-  label_affect.py                 强 rater: aro=wav2vec2 arousal; val=ASD 选来访者脸+FER → turns_labeled.jsonl
-  build_features.py               per-turn text(MiniLM384)/audio(Whisper768)/video(CLIP768) → feats/*.npz + index.jsonl
-  train_mpse.py                   多维 MPSE(GRU+sigmoid α+异方差) session-CV 袋外预测 → pred_mm2.jsonl
-  test_multimodal_value.py        Option C: 轨迹形状 ridge probe → mi_quality（chg-only vs 多模态）
-  build_mm_sft.py                 B 段数据: 三表 join → mm_sft/{train,holdout}.jsonl + npz
-  run_mm_sft.py                   B 段启动器: 调 train_mm_sft(单一 index); --text_only 对照
-  eval_mm_ppl.py                  B 段: holdout assistant-token perplexity(base/text-only/multimodal)
-src/mpse_mvp/eval/
-  metrics.py h1.py h2.py h3.py split.py   纯 numpy: AUC/Spearman/bootstrap/置换检验; H1/H2/H3; session 分层划分
-src/mpse_mvp/mm/ (B 段复用,未大改)  projector / model_wrap(MultiModalPrefixLM) / data_mm / train_mm_sft
-```
+### ★★ 全量脚本清单(2026-07-27 整理,本地=服务器=80 个 .py,每个可追溯到 notes 段)
+> ★=本会话(07-26/27)新增。"当前主管线"=产出最终结果的代码;"试验/诊断"=保留但非主线,均标了对应 notes 痕迹。
+
+**A 段·评估器(感知层)**
+- `src/mpse_mvp/data/annomi.py` — **原数据处理**: AnnoMI CSV→turns_client.jsonl(清洗<2s/时间戳倒序) [§6.8]
+- `scripts/label_chg_zeroshot.py` — chg 弱标签(bart-mnli,AUC0.667) [§7]
+- `scripts/label_affect.py` — 强 rater: aro=wav2vec2 / val=ASD选脸+FER → turns_labeled.jsonl [§7]
+- `scripts/build_features.py` — **视频/多模态抽特征**(Whisper/CLIP/MiniLM)→feats/*.npz [§0.3];`src/mpse_mvp/mm/encoders.py` 编码器
+- `scripts/train_mpse.py` — 训 MPSE(session-CV 袋外)→pred_mm2.jsonl;`train_evaluator_deploy.py` 可部署版→mpse_deploy.pt [§0.4];`src/mpse_mvp/mpse/model_mm.py` 模型
+- `scripts/test_multimodal_value.py` — Option C 质量判别(0.717>0.638) [§0.4]
+- `src/mpse_mvp/eval/{metrics,h1,h2,h3,split}.py` 纯numpy指标/H1-3/划分;`features/{audio,text}_features.py`,`segment/io.py`
+
+**B 段·生成器 SFT(表达层)**
+- `scripts/build_mm_sft.py` — B段数据 三表join→mm_sft/{train,holdout}(40轮历史+state_tag) [§0.3]
+- `scripts/run_mm_sft.py` — SFT启动器(--text_only);`src/mpse_mvp/mm/{data_mm,model_wrap,projector,train_mm_sft,state_tag}.py` 核心
+- `scripts/eval_mm_ppl.py` — holdout ppl [§0.3]
+- ★`scripts/reweight_backchannel.py` — backchannel降权 v1 [§0.2]
+- ★`scripts/reweight_v2.py` — **精细加权 v2/v3**(full金标准子类+会话质量)→train_bcw2/3 [§0.2]
+- ★`scripts/eval_bcw.py` — SFT坍缩评估(按gold长度拆真坍缩) [§0.2]
+
+**B 段·DPO(reward + 训练)**
+- `scripts/behaviour_scorer.py` — 4类行为分类器(reward,CV0.757) / `faithfulness.py` 实体级忠实性 / `reward_model.py` 复合reward [§0.2]
+- `scripts/sample_candidates.py` — 采候选池(demo /generate,k=8);`make_pairs_offline.py` 旧造对(4类,可配消融) [§0.2]
+- ★`scripts/train_oc_clf.py` — open/closed分类器(MiniLM+LogReg CV0.75)→oc_clf.npz [§0.2]
+- ★`scripts/make_pairs_v3.py` — **造偏好对 v3**(open/closed拆分,纯离散reward)→pairs_v3 [§0.2]
+- `scripts/train_dpo.py` — DPO训练(手写损失,ref=SFT,--beta可调) [§0.2]
+- ★`scripts/eval_dpo_v3.py` — DPO评估(base+merge SFT+DPO adapter,vs SFT_v3) [§0.2]
+
+**评估 / judge / demo**
+- `scripts/gen_for_judge.py`(7B旧) / ★`gen4_judge.py`(4方100holdout) / `gpt4_judge.py`(GPT-4o成对盲评,本地,读OPENAI_API_KEY) [§0.2]
+- `scripts/eval_dpo_compare.py`(四配置横评) / `dpo_qualitative.py`(并排) / `eval_ablation.py`(reward消融) / `paired_ppl_boot.py`(bootstrap) [§0.2/0.3]
+- `scripts/demo_server.py`(FastAPI实时demo) / `demo_mm.py`(定性/可控性) / `state_ctrl.py`(状态控制) [§0.2/0.4]
+
+**试验/诊断脚本(保留,痕迹在对应 notes 段)**
+- cross-attn融合(失败,§0.4路线2): `build_features_seq.py`, `src/mpse_mvp/mm/fusion.py`
+- 评估器消融/诊断(§0.4/§7): `ablate_mpse.py`, `ablate_evaluator.py`, `diagnose_mpse.py`, `probe_text_encoders.py`
+- reward/忠实性探索(§0.2忠实性): `faith_diagnose.py`, `entity_grounding_test.py`, `grounding_test.py`, `nli_faithfulness_test.py`(NLI失败), `sweep_length.py`, `eval_dpo_v2.py`(v2失败对照), `build_dpo_pairs.py`(旧在线造对)
+- 生成漂移诊断(§0.2二/三): `topic_drift_test.py`, `multiturn_drift_test.py`
+- ★子类/分类器(§0.2检测器定案): `smoke2_subtype.py`, `clf_compare.py`(LogReg vs MLP)
+- 14B NaN根因调试(§0.4 NaN段,一次性): `diagnose_nan.py`, `nan_locate.py`, `nan_fix_test.py`, `nan_patch_test.py`, `nan_prefix_test.py`, `verify_fast_train.py`
+
+**下载/工具**: `download_annomi_videos.py`(本机下YouTube→scp) / `download_clip.py` / `download_models_ms.py`(ModelScope)
+**run_scripts/(一键脚本×10)**: `run_sft_bcw{,2,3}.sh` / `run_sample_v3.sh` / `run_dpo_v3{,_b03,_b05}.sh` / `watch_and_dpo.sh`(采完自动训) / `run_14b_{full,dpo}.sh`
+
+### 已弃用(2026-07-22 删,旧自录 S0001 管线,旧README描述的就是这套)
+`run_full_loop/run_all/merge_mm_index/label_aro_val` + `src/` 下 `asr/pipeline/sft/supervision/upgrade` + `segment/{vad,diarize,extract_audio}` + `features/video_features`(旧视频处理,被 build_features 取代) + `mm/cache_builder` + `mpse/{model,train}` + `configs/default.yaml`
 
 ---
 
